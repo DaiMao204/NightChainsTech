@@ -33,6 +33,7 @@ atexit.register(close_service)  # 注册退出时的清理函数
 
 
 app = QApplication(sys.argv)
+app.setApplicationName("黑月科技")
 
 translator = FluentTranslator()
 app.installTranslator(translator)

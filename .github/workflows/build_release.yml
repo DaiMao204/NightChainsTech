@@ -1,154 +1,104 @@
-name: Build & Release App
+name: Build & Release NightChainsTech
 
 on:
   workflow_dispatch:
   push:
     tags:
-      - "v*.*.*"
+      - "v*"
 
 permissions:
   contents: write
-  actions: write
 
 jobs:
-  build-updater:
-    name: Build Updater
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4.1.1
-        with:
-          ref: updater
-
-      - name: Set up pdm
-        uses: pdm-project/setup-pdm@v4.4
-        with:
-          python-version: 3.12
-          cache: true
-
-      - name: Install dependencies
-        run: pdm install
-
-      - name: Set VERSION
-        run: echo "__version__='${{ github.ref_name }}'" > version.py
-
-      - name: Generate program
-        shell: pwsh
-        run: |
-          pdm run pyinstaller -F --distpath .\dist\updater -i app\resource\images\logo.ico -n "HeiYue Updater" updater.py -y -w
-
-      - name: Move assets to dist directory
-        run: |
-          Copy-Item -Path ".\dist\updater" -Destination ".\dist\Auto_Resonance_${{ github.ref_name }}" -Recurse -Force
-
-      - name: Create zip archive
-        run: |
-          7z a -tzip -mx=9 ".\dist\Auto_Resonance_Updater_${{ github.ref_name }}.zip" ".\dist\Auto_Resonance_${{ github.ref_name }}"
-
-      - name: Upload Auto_Resonance
-        uses: actions/upload-artifact@v4
-        with:
-          name: Auto_Resonance_Updater_${{ github.ref_name }}.zip
-          path: .\dist\Auto_Resonance_Updater_${{ github.ref_name }}.zip
-
   build:
-    name: Build
+    name: Build Windows Package
     runs-on: windows-latest
-    needs: build-updater
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v4.1.1
-  
-      - name: Download Auto_Resonance
-        uses: actions/download-artifact@v4
-        with:
-          name: Auto_Resonance_Updater_${{ github.ref_name }}.zip
-          path: ./dist
+        uses: actions/checkout@v4
 
-      - name: Set up pdm
-        uses: pdm-project/setup-pdm@v4.4
+      - name: Set up PDM
+        uses: pdm-project/setup-pdm@v4
         with:
-          python-version: 3.12
+          python-version: "3.12"
           cache: true
 
       - name: Install dependencies
         run: pdm install
 
-      - name: Set VERSION
-        run: echo "__version__='${{ github.ref_name }}'" > version.py
-
-      - name: Generate program
+      - name: Set version
         shell: pwsh
         run: |
-          iex (pdm venv activate)
-          $SITE_PACKAGES = pdm venv --path in-project
-          echo $SITE_PACKAGES
-          pdm run pyinstaller -D --distpath .\dist\ -i resources\app\icons\logo.ico -n HeiYue gui.py -y -w --add-data "$SITE_PACKAGES/lib/site-packages/onnxocr/models/ppocrv4;onnxocr/models/ppocrv4"
+          Set-Content -Path version.py -Value "__version__ = '${{ github.ref_name }}'" -Encoding UTF8
 
-      - name: Move assets to dist directory
+      - name: Build updater
+        shell: pwsh
         run: |
-          Copy-Item -Path ".\resources\" -Destination ".\dist\heiyue\resources\" -Recurse -Force
-          Copy-Item -Path ".\README.md" -Destination ".\dist\heiyue\" -Force
-          Copy-Item -Path ".\dist\heiyue" -Destination ".\dist\Auto_Resonance_${{ github.ref_name }}" -Recurse -Force
-          Copy-Item -Path ".\dist\Auto_Resonance_Updater_${{ github.ref_name }}.zip" -Destination ".\dist\Auto_Resonance_${{ github.ref_name }}.zip" -Force
+          pdm run pyinstaller `
+            -F `
+            --distpath .\dist\updater `
+            -i resources\app\icons\logo.ico `
+            -n NightChainsTechUpdater `
+            tools\apply_update.py `
+            -y `
+            -w
 
-      - name: Make increment zip
-        id: make_increment_zip
+      - name: Build application
+        shell: pwsh
         run: |
-          iex (pdm venv activate)
-          python diff_folder.py
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          $venvPath = pdm venv --path in-project
+          $sitePackages = Join-Path $venvPath "Lib\site-packages"
+          pdm run pyinstaller `
+            -D `
+            --distpath .\dist `
+            -i resources\app\icons\logo.ico `
+            -n "黑月科技" `
+            gui.py `
+            -y `
+            -w `
+            --add-data "$sitePackages\onnxocr\models\ppocrv4;onnxocr\models\ppocrv4"
 
-      - name: Add zip archive
+      - name: Assemble package
+        shell: pwsh
         run: |
-          7z a ".\dist\Auto_Resonance_${{ github.ref_name }}.zip" ".\dist\Auto_Resonance_${{ github.ref_name }}"
+          $packageName = "NightChainsTech_${{ github.ref_name }}"
+          $packageRoot = ".\dist\$packageName"
+          New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
+          Copy-Item -Path ".\dist\黑月科技\*" -Destination $packageRoot -Recurse -Force
+          Copy-Item -Path ".\dist\updater\NightChainsTechUpdater.exe" -Destination $packageRoot -Force
+          Copy-Item -Path ".\resources" -Destination "$packageRoot\resources" -Recurse -Force
+          Copy-Item -Path ".\README.md" -Destination $packageRoot -Force
+          Copy-Item -Path ".\LICENSE" -Destination $packageRoot -Force
+          Copy-Item -Path ".\docs" -Destination "$packageRoot\docs" -Recurse -Force
+          7z a -tzip -mx=9 ".\dist\$packageName.zip" $packageRoot
+          $hash = (Get-FileHash ".\dist\$packageName.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -Path ".\dist\SHA256.txt" -Value "SHA256: $hash" -Encoding UTF8
+          @(
+            "# 黑月科技 ${{ github.ref_name }}"
+            ""
+            "测试版发布包：NightChainsTech_${{ github.ref_name }}.zip"
+            ""
+            "``````text"
+            "SHA256: $hash"
+            "``````"
+            ""
+            "> 当前版本仍处于 beta 测试阶段，请保留旧版本备份。"
+          ) | Set-Content -Path ".\dist\release_notes.md" -Encoding UTF8
 
-      - name: Upload Auto_Resonance.zip as artifact
+      - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Auto_Resonance_${{ github.ref_name }}.zip
-          path: .\dist\Auto_Resonance_${{ github.ref_name }}.zip
+          name: NightChainsTech_${{ github.ref_name }}.zip
+          path: .\dist\NightChainsTech_${{ github.ref_name }}.zip
 
-      - name: Create release
+      - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2.0.4
+        uses: softprops/action-gh-release@v2
         with:
-          name: 黑月无人驾驶 ${{ github.ref_name }}
+          name: 黑月科技 ${{ github.ref_name }}
+          body_path: .\dist\release_notes.md
+          prerelease: ${{ contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') }}
           files: |
-            ./dist/Auto_Resonance_${{ github.ref_name }}.zip
-            ./${{ steps.make_increment_zip.outputs.increment_zip }}
-            ./hash.json
-
-  changelog:
-    name: Generate Changelog
-    if: startsWith(github.ref, 'refs/tags/')
-    runs-on: windows-latest
-    needs: build
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4.1.1
-        with:
-            fetch-depth: 0
-            fetch-tags: true
-      
-      - name: Generate Changelog
-        id: generate_changelog
-        uses: Night-stars-1/changelog-generator-action@main
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2.0.4
-        with:
-          name: 黑月无人驾驶 ${{ github.ref_name }}
-          body: |
-            ${{ steps.generate_changelog.outputs.changelog }}
-            [已有 Mirror酱 CDK？点击前往高速下载](https://mirrorchyan.com/zh/projects?rid=Auto_Resonance&source=auto-resonance-release)
-          make_latest: true
-
-      - name: Trigger MirrorChyanUploading
-        shell: bash
-        run: |
-          gh workflow run --repo $GITHUB_REPOSITORY mirrorchyan_uploading
-          gh workflow run --repo $GITHUB_REPOSITORY mirrorchyan_release_note
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            ./dist/NightChainsTech_${{ github.ref_name }}.zip
+            ./dist/SHA256.txt

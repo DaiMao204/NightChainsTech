@@ -7,18 +7,18 @@ changelog:
     authors:
       - octocat
   categories:
-    - title: 修复 Fixs
+    - title: 修复
       labels:
         - fix
         - bug
-    - title: 重大更新 Feats
+    - title: 功能
       labels:
         - feat
         - enhancement
-    - title: 日常更新 Chores
+    - title: 维护
       labels:
         - chore
         - deploy
-    - title: 其他更新 Other Changes
+    - title: 其他更新
       labels:
         - "*"

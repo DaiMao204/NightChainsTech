@@ -108,6 +108,7 @@ venv.bak/
 
 # custom 
 logs/
+cache/
 gui/
 examples/
 test*.py
@@ -121,3 +122,4 @@ hash.json
 .pdm-python
 commit_templates.json
 resources/interface.json
+diagnostics/

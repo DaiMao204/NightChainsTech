@@ -18,6 +18,8 @@ from qfluentwidgets import (
     qconfig
 )
 
+from app.common.config_change import emit_config_changed
+
 class LineEditSettingCard(SettingCard):
     """Setting card with a push button"""
 
@@ -60,6 +62,7 @@ class LineEditSettingCard(SettingCard):
         self.lineEdit.setPlaceholderText(holderText)
 
         self.lineEdit.textChanged.connect(self.textChanged)
+        self.lineEdit.editingFinished.connect(self.notifyChanged)
         self.hBoxLayout.addWidget(self.lineEdit, 0, Qt.AlignmentFlag.AlignRight)
         self.hBoxLayout.addSpacing(16)
     
@@ -68,3 +71,6 @@ class LineEditSettingCard(SettingCard):
 
     def textChanged(self, text):
         qconfig.set(self.configItem, text)
+
+    def notifyChanged(self):
+        emit_config_changed("配置已保存", f"{self.titleLabel.text()} 已更新")

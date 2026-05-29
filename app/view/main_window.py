@@ -27,14 +27,20 @@ from qfluentwidgets import (
 )
 
 import app.common.resource  # 图标数据
-from app.common.config import VERSION, cfg, isWin11
+from app.common.account_config import (
+    account_config_auto_enabled,
+    missing_account_config_reasons,
+)
+from app.common.config import VERSION, cfg, isWin11, qconfig
 from app.common.signal_bus import signalBus
 from app.components.update_message_box import UpdateMessageBox
 from app.utils.constants import ICON_PATH, ROOT_PATH
 from app.utils.utils import is_chinese
+from app.utils.worker import Worker
 from app.view.two_city_run_business_interface import TwoRunBusinessInterface
-from core.utils.update.base_update_utils import UpdateStatus
-from core.utils.update.mirror_update_utils import MirrorUpdateUtils
+from core.control.control import adb_shell
+from core.utils.utils import RESOURCES_PATH, read_json
+from core.utils.update.manifest_update_utils import ManifestUpdateUtils, UpdateStatus
 
 from .adb_data_interface import ADBDataInterface
 from .home_interface import HomeInterface
@@ -42,11 +48,24 @@ from .logger_interface import LoggerInterface
 from .setting_interface import SettingInterface
 
 
+def configured_device_connected() -> bool:
+    device = qconfig.get(cfg.device)
+    if not getattr(device, "port", None):
+        return False
+    try:
+        return "connected" in adb_shell("echo connected")
+    except Exception as exc:
+        logger.debug(f"启动设备连接检测失败: {exc}")
+        return False
+
+
 class MainWindow(MSFluentWindow):
 
     def __init__(self):
         super().__init__()
         self.wights = {}
+        self._prestigePromptShown = False
+        self.startupDeviceCheckWorker: Worker | None = None
 
         # 主题监听器
         self.themeListener = SystemThemeListener(self)
@@ -60,22 +79,25 @@ class MainWindow(MSFluentWindow):
 
         self.splashScreen.finish()
         # 检查更新
-        self.updater = MirrorUpdateUtils()
+        self.updater = ManifestUpdateUtils()
         # self.checkUpdate()
         # 启用主题监听器
         self.themeListener.start()
         
         self.checkChinesePath()
+        QTimer.singleShot(1200, self.checkStartupDeviceConnection)
 
     def connectSignalToSlot(self):
         signalBus.switchToCard.connect(self.switchToCard)
+        signalBus.configChanged.connect(self.showConfigChanged)
+        signalBus.deviceConnected.connect(self.onDeviceConnected)
         # 监听主题切换
         cfg.themeChanged.connect(setTheme)
 
     def initNavigation(self):
-        self.addSubInterface(self.homeInterface, FIF.HOME, "主页")
-        self.addSubInterface(self.two_run_business_interface, FIF.TRAIN, "端点跑商")
-        self.addSubInterface(self.adb_data_interface, FIF.GAME, "ADB信息")
+        self.addSubInterface(self.homeInterface, FIF.HOME, "总览")
+        self.addSubInterface(self.two_run_business_interface, FIF.TRAIN, "跑商配置")
+        self.addSubInterface(self.adb_data_interface, FIF.GAME, "设备连接")
 
         # 底部按钮
         self.addSubInterface(
@@ -103,7 +125,7 @@ class MainWindow(MSFluentWindow):
         self.resize(960, 780)
         self.setMinimumWidth(760)
         self.setWindowIcon(QIcon(str(ICON_PATH / "logo.ico")))
-        self.setWindowTitle(f"黑月无人驾驶 - {VERSION}")
+        self.setWindowTitle(f"黑月科技 - {VERSION}")
 
         self.setMicaEffectEnabled(isWin11())
         self.setResizeEnabled(False)
@@ -151,6 +173,92 @@ class MainWindow(MSFluentWindow):
         """切换到指定界面"""
         self.switchTo(self.wights[routeKey])
 
+    def showConfigChanged(self, title: str, content: str):
+        InfoBar.success(
+            title=title or "配置已更新",
+            content=content or "",
+            orient=Qt.Orientation.Horizontal,
+            isClosable=False,
+            position=InfoBarPosition.TOP,
+            duration=3000,
+            parent=self,
+        )
+
+    def onDeviceConnected(self):
+        QTimer.singleShot(500, self.checkPrestigeConfig)
+
+    def checkStartupDeviceConnection(self):
+        if self._prestigePromptShown:
+            return
+        device = qconfig.get(cfg.device)
+        if not getattr(device, "port", None):
+            return
+        self.startupDeviceCheckWorker = Worker(configured_device_connected)
+        self.startupDeviceCheckWorker.result.connect(self.onStartupDeviceCheckResult)
+        self.startupDeviceCheckWorker.finished.connect(self.onStartupDeviceCheckFinished)
+        self.startupDeviceCheckWorker.start()
+
+    def onStartupDeviceCheckResult(self, connected: bool):
+        if connected:
+            self.onDeviceConnected()
+
+    def onStartupDeviceCheckFinished(self):
+        if self.startupDeviceCheckWorker:
+            self.startupDeviceCheckWorker.deleteLater()
+        self.startupDeviceCheckWorker = None
+
+    def missingPrestigeCities(self) -> list[str]:
+        prestige_cities = self.prestigeCities()
+        prestige_by_city = cfg.tradePlannerPrestigeByCity.value or {}
+        if not isinstance(prestige_by_city, dict):
+            return prestige_cities
+        configured_cities = {
+            self.prestigeMasterCity(str(city).strip())
+            for city, level in prestige_by_city.items()
+            if str(city).strip() and level not in (None, "")
+        }
+        return [city for city in prestige_cities if city not in configured_cities]
+
+    def prestigeCities(self) -> list[str]:
+        data = read_json(RESOURCES_PATH / "goods" / "CityPrestigeThresholds2026.json", {})
+        cities = data.get("cities") if isinstance(data, dict) else {}
+        if not isinstance(cities, dict):
+            return []
+        result: list[str] = []
+        for city in cities.keys():
+            master = self.prestigeMasterCity(str(city).strip())
+            if master and master not in result:
+                result.append(master)
+        return result
+
+    def prestigeMasterCity(self, city: str) -> str:
+        attached = read_json(RESOURCES_PATH / "goods" / "AttachedToCityData.json", {})
+        if isinstance(attached, dict):
+            return str(attached.get(city) or city)
+        return city
+
+    def checkPrestigeConfig(self):
+        if self._prestigePromptShown:
+            return
+        if not account_config_auto_enabled():
+            return
+        reasons = missing_account_config_reasons()
+        if not reasons:
+            return
+        self._prestigePromptShown = True
+
+        content = (
+            "当前为账号配置自动读取模式，但货舱或主城声望配置不完整。\n"
+            f"{'；'.join(reasons)}\n\n"
+            "需要先读取账号配置，才能进行自动规划或跑商。"
+        )
+        w = MessageBox("需要读取账号配置", content, self)
+        w.yesButton.setText("读取配置")
+        w.cancelButton.setText("稍后")
+        if w.exec():
+            self.switchTo(self.two_run_business_interface)
+            QTimer.singleShot(300, self.two_run_business_interface.focusAndAnalyzeAccountProfile)
+
     def closeEvent(self, e):
         # 停止监听器线程
         self.themeListener.terminate()
@@ -168,43 +276,23 @@ class MainWindow(MSFluentWindow):
         """
         检查更新
         """
-        update_status = self.updater.get_update_status(cfg.mirrorCdk.value, reload=True)
+        update_status = self.updater.get_update_status(reload=True)
         if update_status == UpdateStatus.UPDATE:
-            self.update_message_box.show(cfg.mirrorCdk.value)
+            self.update_message_box.show_update(self.updater.data)
         elif update_status == UpdateStatus.FAILED:
             InfoBar.error(
                 title="检查更新失败",
-                content="请稍后重试",
+                content="无法连接 GitHub，或最新 Release 中没有可用的 ZIP 更新包。",
                 orient=Qt.Orientation.Horizontal,
                 isClosable=False,
                 position=InfoBarPosition.TOP,
-                duration=1000,
-                parent=self,
-            )
-        elif update_status == UpdateStatus.NOSUPPORT:
-            InfoBar.error(
-                title="更新程序只支持打包成exe后运行",
-                content="",
-                orient=Qt.Orientation.Horizontal,
-                isClosable=False,
-                position=InfoBarPosition.TOP,
-                duration=1000,
+                duration=3000,
                 parent=self,
             )
         elif update_status == UpdateStatus.LATEST:
             InfoBar.success(
                 title="当前已是最新版本",
                 content="",
-                orient=Qt.Orientation.Horizontal,
-                isClosable=False,
-                position=InfoBarPosition.TOP,
-                duration=1000,
-                parent=self,
-            )
-        elif update_status == UpdateStatus.FAILDCDK:
-            InfoBar.error(
-                title="Mirror CDK校验失败",
-                content="请检查Mirror CDK是否正确",
                 orient=Qt.Orientation.Horizontal,
                 isClosable=False,
                 position=InfoBarPosition.TOP,
@@ -223,7 +311,7 @@ class MainWindow(MSFluentWindow):
             )
 
     def checkUpdate(self):
-        update_status = self.updater.get_update_status(cfg.mirrorCdk.value)
+        update_status = self.updater.get_update_status()
         if update_status == UpdateStatus.UPDATE and self.updateButton is not None:
             self.updateBadge = DotInfoBadge.error(
                 parent=self.navigationInterface,

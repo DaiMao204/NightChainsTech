@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 from PySide6.QtWidgets import QWidget
 from qfluentwidgets import CheckBox, ConfigItem, qconfig
 
+from app.common.config_change import emit_config_changed
 from app.components.layout.flow_layout import FlowLayout
 
 
@@ -46,6 +47,10 @@ class CheckboxGroup(QWidget):
 
     def onCheckStateChanged(self, checkbox: CheckBox, configItem: ConfigItem):
         qconfig.set(configItem, checkbox.isChecked())
+        emit_config_changed(
+            "配置已保存",
+            f"{checkbox.text()}：{'开启' if checkbox.isChecked() else '关闭'}",
+        )
 
     def count(self):
         return sum(1 for checkbox in self.checkboxGroup if checkbox.isChecked())

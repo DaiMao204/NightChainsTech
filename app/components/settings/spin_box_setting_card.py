@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from qfluentwidgets import ConfigItem, FluentIconBase, SettingCard, SpinBox, qconfig
 
-from app.common.signal_bus import signalBus
+from app.common.config_change import emit_config_changed
 
 
 class SpinBoxSettingCard(SettingCard):
@@ -58,3 +58,4 @@ class SpinBoxSettingCard(SettingCard):
 
     def valueChanged(self, value: int):
         qconfig.set(self.configItem, value)
+        emit_config_changed("配置已保存", f"{self.titleLabel.text()}：{value}")

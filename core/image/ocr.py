@@ -10,12 +10,16 @@ from typing import Tuple, Union
 
 import cv2 as cv
 from loguru import logger
+import onnxruntime as ort
 from onnxocr.onnx_paddleocr import ONNXPaddleOcr
 
 from core.image.utils import crop_image
 
 model = ONNXPaddleOcr(
-    use_angle_cls=False, use_gpu=True, use_dml=False, use_openvino=False
+    use_angle_cls=False,
+    use_gpu="CUDAExecutionProvider" in ort.get_available_providers(),
+    use_dml=False,
+    use_openvino=False,
 )
 
 def ocrout2result(out, cropped_pos1):
@@ -70,7 +74,7 @@ def predict(
         image = crop_image(image, cropped_pos1, cropped_pos2)
     out = model.ocr(image)
     result = ocrout2result(out, cropped_pos1)
-    logger.debug(result)
+    logger.debug("OCR result count: {}", len(result))
     return result
 
 
@@ -95,5 +99,5 @@ def number_predict(
         image = crop_image(image, cropped_pos1, cropped_pos2)
     out = model.ocr(image)
     result = ocrout2result(out, cropped_pos1)
-    logger.debug(result)
+    logger.debug("OCR result count: {}", len(result))
     return result

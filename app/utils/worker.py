@@ -9,8 +9,8 @@ import inspect
 from PySide6.QtCore import QThread, Signal
 from loguru import logger
 
+from app.common.runtime_status import emit_run_status
 from core.exception.exceptions import StopExecution
-from core.utils.update.base_update_utils import BaseUpdateUtils
 
 from ..common.config import cfg
 
@@ -29,16 +29,20 @@ class Worker(QThread):
             result = self.func(**self.kwargs)
             self.result.emit(result)
         except StopExecution:
+            emit_run_status("已停止", "任务已收到停止请求")
             pass
         except AssertionError as e:
             logger.error(f"{e}")
+            emit_run_status("运行异常", str(e))
         except Exception:
             logger.exception("崩溃信息:")
+            emit_run_status("运行异常", "脚本执行时发生异常，已保存诊断信息")
 
     def stop(self):
         self.stop_func()
 
 class UpdateWorker(QThread):
+    result = Signal(object)
     progress_changed = Signal(int)
     update_finished = Signal(bool)
 
@@ -55,10 +59,17 @@ class UpdateWorker(QThread):
 
     def run(self):
         try:
-            self.func(**self.kwargs)
+            result = self.func(**self.kwargs)
+            self.result.emit(result)
+            self.update_finished.emit(True)
         except StopExecution:
+            emit_run_status("已停止", "任务已收到停止请求")
             self.update_finished.emit(False)
         except AssertionError as e:
             logger.error(f"{e}")
+            emit_run_status("运行异常", str(e))
+            self.update_finished.emit(False)
         except Exception:
             logger.exception("崩溃信息:")
+            emit_run_status("运行异常", "脚本执行时发生异常，已保存诊断信息")
+            self.update_finished.emit(False)

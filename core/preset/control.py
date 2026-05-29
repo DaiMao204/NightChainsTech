@@ -16,7 +16,10 @@ from core.module.bgr import BGR
 
 from core.control.control import input_tap, screenshot
 from core.exception.exception_handling import get_excption
+from core.utils.runtime_state import capture_state
 from core.utils.utils import RESOURCES_PATH
+
+GO_HOME_ATTEMPTS = 12
 
 
 def wait_gbr(
@@ -219,7 +222,9 @@ def go_home():
     返回主界面
     """
     logger.info("返回主界面")
-    while screenshot().match_template(RESOURCES_PATH / "main_map.png", 0.96) == False:
+    for attempt in range(1, GO_HOME_ATTEMPTS + 1):
+        if screenshot().match_template(RESOURCES_PATH / "main_map.png", 0.96):
+            return True
         time.sleep(1)
         logger.debug("尝试返回主界面")
         click_image(
@@ -229,3 +234,5 @@ def go_home():
             trynum=1,
             check_err=False,
         )
+    capture_state("go_home_attempts_exhausted", extra={"attempts": GO_HOME_ATTEMPTS})
+    return False

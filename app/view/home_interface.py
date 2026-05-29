@@ -5,152 +5,129 @@ LastEditTime: 2025-02-11 19:08:33
 LastEditors: Night-stars-1 nujj1042633805@gmail.com
 """
 
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import (
-    QBrush,
-    QColor,
-    QLinearGradient,
-    QPainter,
-    QPainterPath,
-    QPixmap,
-)
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
-from qfluentwidgets import (
-    FluentIcon,
-    InfoBar,
-    InfoBarIcon,
-    InfoBarPosition,
-    ScrollArea,
-    isDarkTheme
-)
+from qfluentwidgets import FluentIcon as FIF
+from qfluentwidgets import ScrollArea, SettingCard
 
-from app.common.config import REPO_URL, cfg
+from app.common.run_status_display import format_profit_status
+from app.common.signal_bus import signalBus
 from app.common.style_sheet import StyleSheet
 from app.components.button_card import ButtonCardView
-from app.components.link_card import LinkCardView
-from app.components.settings.checkbox_group_card import CheckboxGroup
-from app.utils.constants import ICON_PATH
-from core.control.control import stop
+from core.control.control import stop as stop_control
 
 
-class BannerWidget(QWidget):
-    """Banner widget"""
+def stop_all_tasks():
+    from auto.run_business import stop as stop_run_business
 
-    def __init__(self, parent=None):
-        super().__init__(parent=parent)
-        self.setFixedHeight(336)
-
-        self.vBoxLayout = QVBoxLayout(self)
-        self.titleLabel = QLabel("黑月无人驾驶", self)
-        self.banner = QPixmap(ICON_PATH / "header.png")
-        self.linkCardView = LinkCardView(self)
-
-        self.__initWidget()
-        self.loadSamples()
-
-    def __initWidget(self):
-        self.titleLabel.setObjectName("galleryLabel")
-
-        self.vBoxLayout.setSpacing(0)
-        self.vBoxLayout.setContentsMargins(0, 20, 0, 0)
-        self.vBoxLayout.addWidget(self.titleLabel)
-        self.vBoxLayout.addWidget(self.linkCardView, 1, Qt.AlignmentFlag.AlignBottom)
-        self.vBoxLayout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-
-    def loadSamples(self):
-        self.linkCardView.addCard(
-            FluentIcon.GITHUB, "GitHub repo", "黑月无人驾驶", REPO_URL
-        )
-
-    def paintEvent(self, e):
-        super().paintEvent(e)
-        painter = QPainter(self)
-        painter.setRenderHints(QPainter.RenderHint.SmoothPixmapTransform | QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-
-        path = QPainterPath()
-        path.setFillRule(Qt.FillRule.WindingFill)
-        w, h = self.width(), self.height()
-        path.addRoundedRect(QRectF(0, 0, w, h), 10, 10)
-        path.addRect(QRectF(0, h - 50, 50, 50))
-        path.addRect(QRectF(w - 50, 0, 50, 50))
-        path.addRect(QRectF(w - 50, h - 50, 50, 50))
-        path = path.simplified()
-
-        # 初始化线性渐变效果
-        gradient = QLinearGradient(0, 0, 0, h)
-
-        # 绘制背景颜色
-        if not isDarkTheme():
-            gradient.setColorAt(0, QColor(207, 216, 228, 255))
-            gradient.setColorAt(1, QColor(207, 216, 228, 0))
-        else:
-            gradient.setColorAt(0, QColor(0, 0, 0, 255))
-            gradient.setColorAt(1, QColor(0, 0, 0, 0))
-
-        painter.fillPath(path, QBrush(gradient))
-
-        # # 绘制图片
-        pixmap = self.banner.scaled(self.size(), aspectMode=Qt.AspectRatioMode.KeepAspectRatioByExpanding, mode=Qt.TransformationMode.SmoothTransformation)
-        painter.fillPath(path, QBrush(pixmap))
+    stop_control()
+    stop_run_business()
 
 
 class HomeInterface(ScrollArea):
-    """Home interface"""
+    """Application overview."""
 
     def __init__(self, parent=None):
         super().__init__(parent=parent)
 
-        self.banner = BannerWidget(self)
         self.view = QWidget(self)
         self.vBoxLayout = QVBoxLayout(self.view)
-        self.taskCheckboxGroup = CheckboxGroup(self.view)
+        self.titleLabel = QLabel("总览", self)
+        self.runStatusCard = SettingCard(
+            FIF.TRAIN,
+            "运行状态",
+            "等待开始",
+            self.view,
+        )
+        self.runStatusCard.setFixedHeight(110)
+        self.runStatusCard.contentLabel.setWordWrap(True)
+        self.runStatusProfitLabel = QLabel("", self.runStatusCard)
+        self.runStatusProfitLabel.setMinimumWidth(320)
+        self.runStatusProfitLabel.setWordWrap(True)
+        self.runStatusProfitLabel.hide()
+        self.runStatusCard.hBoxLayout.addWidget(
+            self.runStatusProfitLabel, 0, Qt.AlignmentFlag.AlignRight
+        )
+        self.runStatusCard.hBoxLayout.addSpacing(16)
+
         self.__initWidget()
         self.loadSamples()
+        signalBus.runStatusChanged.connect(self.updateRunStatus)
 
     def __initWidget(self):
         self.view.setObjectName("view")
+        self.titleLabel.setObjectName("galleryLabel")
         self.setObjectName("HomeInterface")
         StyleSheet.HOME_INTERFACE.apply(self)
 
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setWidget(self.view)
         self.setWidgetResizable(True)
+        self.setViewportMargins(0, 80, 0, 20)
 
-        self.vBoxLayout.setContentsMargins(0, 0, 0, 36)
-        self.vBoxLayout.setSpacing(10)
-        self.vBoxLayout.addWidget(self.banner)
+        self.titleLabel.move(36, 30)
+        self.vBoxLayout.setContentsMargins(36, 0, 36, 36)
+        self.vBoxLayout.setSpacing(16)
+        self.vBoxLayout.addWidget(self.runStatusCard)
         self.vBoxLayout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
     def loadSamples(self):
-        """load samples"""
-
-        tipBar = InfoBar(
-            icon=InfoBarIcon.WARNING,
-            title=self.tr("Warning"),
-            content="推荐使用 MUMU模拟器 分辨率必须为16:9，推荐: 1920x1080/1280x720",
-            orient=Qt.Orientation.Vertical,
-            isClosable=False,
-            duration=-1,
-            position=InfoBarPosition.NONE,
-            parent=self.view,
+        quickStartView = ButtonCardView("快速入口", parent=self.view)
+        quickStartView.addSampleCard(
+            icon=FIF.TRAIN,
+            title="跑商配置",
+            content="规划路线、查看利润并执行自动跑商",
+            func=lambda: None,
+            routekey="TwoCityRunnBusinessInterface",
         )
-
-        basicInputView = ButtonCardView(
-            "开始运行", header=self.taskCheckboxGroup, parent=self.view
+        quickStartView.addSampleCard(
+            icon=FIF.GAME,
+            title="设备连接",
+            content="扫描模拟器并选择当前连接设备",
+            func=lambda: None,
+            routekey="ADBDataInterface",
         )
-
-        basicInputView.vBoxLayout.insertWidget(0, tipBar)
-        # self.taskCheckboxGroup.addCheckbox("购买桦石", cfg.huashi)
-        # self.taskCheckboxGroup.addCheckbox("刷铁安局", cfg.railwaySafetyBureau)
-
-        basicInputView.addSampleCard(
-            icon=":/gallery/images/controls/Button.png",
-            title="停止",
-            content="停止运行",
-            func=stop,
-            routekey="LoggerInterface",
+        quickStartView.addSampleCard(
+            icon=FIF.CANCEL,
+            title="停止当前脚本",
+            content="停止正在执行的自动化流程",
+            func=stop_all_tasks,
+            routekey=None,
         )
+        quickStartView.addSampleCard(
+            icon=FIF.SETTING,
+            title="设置",
+            content="更新、设备地址和基础选项",
+            func=lambda: None,
+            routekey="SettingInterface",
+        )
+        self.vBoxLayout.addWidget(quickStartView)
 
+    def updateRunStatus(self, status: dict):
+        stage = str(status.get("stage") or "运行中")
+        detail = str(status.get("detail") or "")
+        route = str(status.get("route") or "")
+        current_city = str(status.get("current_city") or "")
+        target_city = str(status.get("target_city") or "")
+        goods = status.get("goods") or []
+        profit_text = format_profit_status(status)
 
-        self.vBoxLayout.addWidget(basicInputView)
+        self.runStatusCard.titleLabel.setText(f"运行状态：{stage}")
+        parts = []
+        if route:
+            parts.append(f"路线：{route}")
+        if target_city:
+            parts.append(f"目标：{target_city}")
+        elif current_city:
+            parts.append(f"城市：{current_city}")
+        if goods:
+            parts.append("商品：" + "、".join(str(good) for good in goods))
+        if detail:
+            parts.append(detail)
+        self.runStatusCard.contentLabel.setText("  |  ".join(parts) or "等待开始")
+        if not profit_text:
+            self.runStatusProfitLabel.clear()
+            self.runStatusProfitLabel.hide()
+        else:
+            self.runStatusProfitLabel.setText(profit_text)
+            self.runStatusProfitLabel.show()

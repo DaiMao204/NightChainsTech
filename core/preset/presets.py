@@ -8,6 +8,8 @@ LastEditors: Night-stars-1 nujj1042633805@gmail.com
 import time
 from typing import Dict, Optional, Tuple
 
+import cv2 as cv
+import numpy as np
 from loguru import logger
 
 from core.control.control import (
@@ -20,12 +22,20 @@ from core.control.control import (
 from core.module.bgr import BGR
 from core.image.ocr import predict
 from core.preset import blurry_ocr_click, go_home
+from core.preset.page_state import capture_page_state
+from core.utils.runtime_state import capture_state
 from core.utils.utils import RESOURCES_PATH, read_json
 
 from .control import click_image, ocr_click
+from .map_navigation import (
+    MapNavigationError,
+    open_station_map_from_home,
+    select_station_on_map,
+)
 from .station import STATION
 
 FIGHT_TIME = 1000
+FIGHT_END_TEMPLATE_THRESHOLD = 0.98
 
 STATION_NAME2PNG: Dict[str, str] = read_json(RESOURCES_PATH / "stations/name2id.json")
 
@@ -61,11 +71,16 @@ def calculate_station_differences(station_map_data: dict):
 
 # 计算站点之间的差值
 STATION_DIFFERENCES = calculate_station_differences(STATION_POS_DATA)
+GO_CITY_ATTEMPTS = 8
+OUTLET_AVATAR_FALLBACK_Y_OFFSET = 65
+OUTLET_AVATAR_MIN_DY = 25
+OUTLET_AVATAR_MAX_DY = 135
+OUTLET_AVATAR_MAX_DX = 170
 
 
 def click_station(name: str, cur_station: Optional[str] = None):
     """
-    点击站点, 该滑动通过站点间相对距离完成
+    点击站点
 
     :param name: 目标站点
     :param cur_station: 当前站点
@@ -73,7 +88,9 @@ def click_station(name: str, cur_station: Optional[str] = None):
     logger.info(f"点击站点 => {name}")
     if screenshot().match_template(RESOURCES_PATH / "main_map.png", 0.95) == False:
         logger.info("未检测到主地图界面，返回主地图")
-        go_home()
+        if not go_home():
+            capture_page_state("click_station_go_home_failed", extra={"target": name})
+            return STATION(False)
     logger.info("检测到主地图界面，识别站点")
     if not cur_station:
         station = get_station(is_go_home=False)
@@ -82,67 +99,32 @@ def click_station(name: str, cur_station: Optional[str] = None):
     if name == station:
         logger.info("已在目标站点")
         return STATION(True, is_destine=True)
-    else:
-        go_home()
 
-    if name not in STATION_NAME2PNG:
-        raise ValueError(f"未找到站点 {name} 的图片")
-    city_differences = STATION_DIFFERENCES.get((station, name))
-    if city_differences:
-        # 点击地图
-        input_tap((1201, 666))
-        # 等待地图打开
-        time.sleep(0.5)
-        wait_stopped(threshold=7100000)
-
-        source_x = 640
-        source_y = 360
-        # 如果有路线则进行寻找
-        x1 = source_x + city_differences[0] / 2.5
-        y1 = source_y + city_differences[1] / 2.5
-
-        # 滑动到目标站点
-        input_swipe((x1, y1), (source_x, source_y), swipe_time=800)
-        # 向回拖动避免画面长时间移动
-        input_swipe(
-            (source_x, source_y), (source_x - 10, source_y - 10), swipe_time=500
+    if not go_home():
+        capture_page_state("click_station_prepare_map_failed", extra={"target": name})
+        return STATION(False)
+    try:
+        open_station_map_from_home()
+        probe = select_station_on_map(
+            name,
+            travel=True,
+            current_station=station,
+            coordinate_first=True,
+            route_first=False,
+            fallback_scan=False,
         )
-        wait_stopped(threshold=7100000)  # 等待滑动完成
-
-        image = screenshot()
-        image.crop_image((0, 0), (1280, 654))
-        result = image.match_template(
-            RESOURCES_PATH / "stations" / STATION_NAME2PNG[name], 0.95
+    except MapNavigationError as exc:
+        logger.error(f"站点导航失败: {exc}")
+        capture_page_state(
+            "click_station_navigation_failed",
+            extra={"target": name, "current_station": station, "error": str(exc)},
         )
-        if result:
-            # 点击站点
-            input_tap(result.loc)
-        else:
-            logger.info(f"未找到站点 {name}，尝试OCR识别")
-            if not ocr_click(name):
-                logger.error(f"未找到站点: {name}")
-                return STATION(False)
-        time.sleep(0.5)
-        # 点击前往目的地按钮
-        logger.info("点击前往目的地按钮")
-        if click_image(
-            RESOURCES_PATH / "map/go_station.png",
-            cropped_pos1=(937, 605),
-            cropped_pos2=(1218, 679),
-            trynum=5,
-        ):
-            time.sleep(1.0)
-            click_image(
-                RESOURCES_PATH / "map/join_station.png",
-                cropped_pos1=(719, 405),
-                cropped_pos2=(927, 485),
-                trynum=5,
-            )
-            return STATION(True)
-        else:
-            logger.error(f"未找到前往目的地按钮: {name}")
-    else:
-        logger.error("没有该站点的坐标信息")
+        return STATION(False)
+
+    if probe:
+        return STATION(True)
+
+    logger.error(f"未能确认目标站点: {name}")
     return STATION(False)
 
 
@@ -159,6 +141,8 @@ def get_station(is_go_home: bool = True):
         screenshot_image(), cropped_pos1=(166, 520), cropped_pos2=(470, 600)
     )
     if len(reslut) == 0:
+        capture_state("get_station_ocr_empty")
+        capture_page_state("get_station_ocr_empty")
         raise ValueError("未识别到当前城市")
     logger.info(f"当前站点: {reslut[0]['text']}")
     if is_go_home:
@@ -172,14 +156,86 @@ def go_city():
     说明:
         进入城市界面
     """
-    while (
-        screenshot()
-        .crop_image(cropped_pos1=(25, 634), cropped_pos2=(99, 707))
-        .match_template(RESOURCES_PATH / "fame.png", 0.95)
-        == False
-    ):
+    for attempt in range(1, GO_CITY_ATTEMPTS + 1):
+        if (
+            screenshot()
+            .crop_image(cropped_pos1=(25, 634), cropped_pos2=(99, 707))
+            .match_template(RESOURCES_PATH / "fame.png", 0.95)
+        ):
+            return True
         input_tap((1270, 494))
         time.sleep(2.0)
+    capture_state("go_city_attempts_exhausted", extra={"attempts": GO_CITY_ATTEMPTS})
+    capture_page_state("go_city_attempts_exhausted", extra={"attempts": GO_CITY_ATTEMPTS})
+    return False
+
+
+def _text_center(position) -> tuple[int, int]:
+    return (
+        int((position[0][0] + position[2][0]) / 2),
+        int((position[0][1] + position[2][1]) / 2),
+    )
+
+
+def _matches_outlet_name(text: str, name: str, score: float = 0.65) -> bool:
+    text = text.replace(" ", "")
+    name = name.replace(" ", "")
+    if name in text:
+        return True
+    return len(name) / max(len(text), 1) >= score and text in name
+
+
+def _outlet_avatar_circles(raw) -> list[tuple[int, int, int]]:
+    gray = cv.cvtColor(raw, cv.COLOR_BGR2GRAY)
+    gray = cv.medianBlur(gray, 5)
+    circles = cv.HoughCircles(
+        gray,
+        cv.HOUGH_GRADIENT,
+        dp=1.2,
+        minDist=80,
+        param1=80,
+        param2=32,
+        minRadius=35,
+        maxRadius=72,
+    )
+    if circles is None:
+        return []
+    return [tuple(map(int, circle)) for circle in np.round(circles[0]).astype(int)]
+
+
+def find_outlet_avatar_click_point(name: str, image=None) -> tuple[int, int] | None:
+    """Find the circular building portrait under a city building name."""
+    image = image or screenshot()
+    raw = image.image
+    for item in image.ocr():
+        if not _matches_outlet_name(item.get("text", ""), name):
+            continue
+        text_x, text_y = _text_center(item["position"])
+        candidates = []
+        for circle_x, circle_y, radius in _outlet_avatar_circles(raw):
+            dx = abs(circle_x - text_x)
+            dy = circle_y - text_y
+            if dx > OUTLET_AVATAR_MAX_DX or not (OUTLET_AVATAR_MIN_DY <= dy <= OUTLET_AVATAR_MAX_DY):
+                continue
+            score = dx * 1.2 + abs(dy - OUTLET_AVATAR_FALLBACK_Y_OFFSET) * 0.8
+            candidates.append((score, circle_x, circle_y, radius))
+        if candidates:
+            _, circle_x, circle_y, radius = min(candidates, key=lambda item: item[0])
+            logger.debug(f"建筑头像点击点: {name} -> {(circle_x, circle_y)} radius={radius}")
+            return circle_x, circle_y
+        return text_x, text_y + OUTLET_AVATAR_FALLBACK_Y_OFFSET
+    return None
+
+
+def click_outlet_avatar(name: str, trynum: int = 3) -> bool:
+    for _ in range(trynum):
+        image = screenshot()
+        point = find_outlet_avatar_click_point(name, image)
+        if point:
+            input_tap(point)
+            return True
+        time.sleep(1)
+    return False
 
 
 def go_outlets(name: str):
@@ -188,28 +244,45 @@ def go_outlets(name: str):
 
     :param name: 门店名称
     """
-    go_city()
+    if not go_city():
+        return False
     logger.info(f"前往 => {name}")
-    if result := blurry_ocr_click(name, excursion_pos=(0, 80), log=False):
+    if result := click_outlet_avatar(name):
+        return result
+    if result := blurry_ocr_click(name, excursion_pos=(0, OUTLET_AVATAR_FALLBACK_Y_OFFSET), log=False):
         return result
     input_swipe((457, 340), (457, 369), swipe_time=500)
-    if result := ocr_click(name, excursion_pos=(0, 80), log=False):
+    if result := click_outlet_avatar(name, trynum=1):
+        return result
+    if result := ocr_click(name, excursion_pos=(0, OUTLET_AVATAR_FALLBACK_Y_OFFSET), log=False):
         return result
     input_swipe((400, 340), (457, 340), swipe_time=500)
-    if result := ocr_click(name, excursion_pos=(0, 80), log=False):
+    if result := click_outlet_avatar(name, trynum=1):
+        return result
+    if result := ocr_click(name, excursion_pos=(0, OUTLET_AVATAR_FALLBACK_Y_OFFSET), log=False):
         return result
     input_swipe((969, 369), (457, 340), swipe_time=500)
-    if result := ocr_click(name, excursion_pos=(0, 80), log=False):
+    if result := click_outlet_avatar(name, trynum=1):
+        return result
+    if result := ocr_click(name, excursion_pos=(0, OUTLET_AVATAR_FALLBACK_Y_OFFSET), log=False):
         return result
     input_swipe((641, 246), (637, 615), swipe_time=500)
-    if result := ocr_click(name, excursion_pos=(0, 80)):
+    if result := click_outlet_avatar(name, trynum=1):
         return result
+    if result := ocr_click(name, excursion_pos=(0, OUTLET_AVATAR_FALLBACK_Y_OFFSET)):
+        return result
+    capture_state("go_outlets_not_found", extra={"name": name})
+    capture_page_state("go_outlets_not_found", extra={"name": name})
+    return False
 
 def go_shop():
     """
     前往交易所
     """
-    click_image(RESOURCES_PATH / "shop" / "1.png", trynum=1, check_err=False)
+    result = click_image(RESOURCES_PATH / "shop" / "1.png", trynum=1, check_err=False)
+    if not result:
+        capture_page_state("go_shop_not_found")
+    return result
 
 def wait_fight_end():
     """
@@ -218,6 +291,7 @@ def wait_fight_end():
     """
     logger.info("等待战斗结束")
     start = time.perf_counter()
+    auto_battle_clicked = False
     while time.perf_counter() - start < FIGHT_TIME:
         image = screenshot()
         bgrs = image.get_bgrs([(1114, 630), (1204, 624), (167, 29)])
@@ -230,7 +304,7 @@ def wait_fight_end():
             input_tap((1151, 626))
             continue
         elif image.crop_image((1070, 600), (1251, 670)).match_template(
-            RESOURCES_PATH / "fight/end_fight.png", 0.995
+            RESOURCES_PATH / "fight/end_fight.png", FIGHT_END_TEMPLATE_THRESHOLD
         ):
             logger.info("战斗结束")
             time.sleep(1.0)
@@ -244,9 +318,12 @@ def wait_fight_end():
         #     time.sleep(1.0)
         #     input_tap((1151, 626))
         #     return True
-        elif bgrs[2] == [124, 126, 125]:
+        elif bgrs[2] == [124, 126, 125] and not auto_battle_clicked:
             logger.info("开启自动战斗")
             input_tap((233, 44))
+            auto_battle_clicked = True
         time.sleep(3)
     logger.error("战斗超时")
+    capture_state("wait_fight_end_timeout", extra={"timeout": FIGHT_TIME})
+    capture_page_state("wait_fight_end_timeout", extra={"timeout": FIGHT_TIME})
     return False
