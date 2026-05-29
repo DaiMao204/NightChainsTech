@@ -70,7 +70,6 @@ jobs:
           Copy-Item -Path ".\resources" -Destination "$packageRoot\resources" -Recurse -Force
           Copy-Item -Path ".\README.md" -Destination $packageRoot -Force
           Copy-Item -Path ".\LICENSE" -Destination $packageRoot -Force
-          Copy-Item -Path ".\docs" -Destination "$packageRoot\docs" -Recurse -Force
           7z a -tzip -mx=9 ".\dist\$packageName.zip" $packageRoot
           $hash = (Get-FileHash ".\dist\$packageName.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
           Set-Content -Path ".\dist\SHA256.txt" -Value "SHA256: $hash" -Encoding UTF8
