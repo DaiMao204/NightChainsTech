@@ -804,6 +804,18 @@ def _crew_sort_arrow_down(raw: Any, sort_entry: dict[str, Any]) -> bool | None:
     return arrow_down
 
 
+def _crew_sort_tap_point(raw: Any, sort_entry: dict[str, Any]) -> tuple[int, int]:
+    """Tap the sort arrow/label left edge, away from the nearby filter button."""
+    left, top, right, bottom = _entry_bounds(sort_entry)
+    height, width = raw.shape[:2]
+    center_y = min(height - 1, max(0, int((top + bottom) / 2)))
+    arrow_x = int(left) - 20
+    if 0 <= arrow_x < width:
+        return arrow_x, center_y
+    label_x = int(left + min(max((right - left) * 0.22, 12), 28))
+    return min(width - 1, max(0, label_x)), center_y
+
+
 def _ensure_crew_sort_by_acquired_time() -> bool:
     for attempt in range(3):
         raw = screenshot_image()
@@ -828,8 +840,7 @@ def _ensure_crew_sort_by_acquired_time() -> bool:
             logger.debug("乘员获取时间排序箭头方向未能可靠识别，按当前排序继续扫描")
             return True
 
-        x, y = _entry_center(sort_entry)
-        input_tap((int(x), int(y)))
+        input_tap(_crew_sort_tap_point(raw, sort_entry))
         time.sleep(0.7)
     return True
 
