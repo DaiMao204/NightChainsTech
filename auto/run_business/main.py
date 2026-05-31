@@ -629,6 +629,41 @@ def ensure_trade_strength(
     )
 
 
+def ensure_business_page_ready(
+    type: Literal["buy", "sell"],
+    city_name: str,
+    route_text: str,
+    profit_fields: dict[str, Any],
+    context: str,
+) -> bool:
+    target_page = PageKind.BUY_PAGE if type == "buy" else PageKind.SELL_PAGE
+    state = classify_page()
+    if state.kind == target_page or is_business_page(type):
+        return True
+    logger.warning(
+        f"{context}后不在目标交易页: expected={target_page.value} "
+        f"actual={state.kind.value} confidence={state.confidence}"
+    )
+    emit_run_status(
+        "正在恢复交易页",
+        f"{context}后正在重新进入{'买入' if type == 'buy' else '卖出'}页面",
+        route=route_text,
+        current_city=city_name,
+        **profit_fields,
+    )
+    if go_business(type):
+        return True
+    capture_state(
+        f"run_restore_{type}_page_failed",
+        extra={"city": city_name, "context": context, "actual": state.kind.value},
+    )
+    capture_page_state(
+        f"run_restore_{type}_page_failed",
+        extra={"city": city_name, "context": context, "actual": state.kind.value},
+    )
+    return False
+
+
 def drink_after_arrival_if_needed(city_name: str, route_text: str, profit_fields: dict[str, Any]) -> None:
     emit_run_status(
         "检查喝酒恢复",
@@ -759,6 +794,22 @@ def run(routes: RoutesModel, start_city_name: str | None = None):
                 return False
             if not already_at_buy_city:
                 drink_after_arrival_if_needed(city_name, route_text, profit_fields)
+                if not ensure_business_page_ready(
+                    "buy",
+                    city_name,
+                    route_text,
+                    profit_fields,
+                    "到站喝酒检查",
+                ):
+                    emit_run_status(
+                        "恢复买入页面失败",
+                        f"{city_name} 到站喝酒检查后未能回到买入页面",
+                        route=route_text,
+                        current_city=city_name,
+                        **profit_fields,
+                    )
+                    reset_game_after_run_failure("run_restore_buy_after_drink_failed", {"city": city_name})
+                    return False
             if not initial_cargo_checked:
                 if not clear_initial_cargo_if_needed(city_name, route_text, profit_fields):
                     emit_run_status(
@@ -782,6 +833,22 @@ def run(routes: RoutesModel, start_city_name: str | None = None):
                 required_fatigue=leg_fatigue,
                 context=f"{city.buy_city_name} -> {city.sell_city_name} 本段跑商",
             ):
+                return False
+            if not ensure_business_page_ready(
+                "buy",
+                city_name,
+                route_text,
+                profit_fields,
+                "疲劳检查",
+            ):
+                emit_run_status(
+                    "恢复买入页面失败",
+                    f"{city_name} 疲劳检查后未能回到买入页面",
+                    route=route_text,
+                    current_city=city_name,
+                    **profit_fields,
+                )
+                reset_game_after_run_failure("run_restore_buy_after_strength_failed", {"city": city_name})
                 return False
             emit_run_status(
                 "正在购买商品",
@@ -860,7 +927,39 @@ def run(routes: RoutesModel, start_city_name: str | None = None):
             reset_game_after_run_failure("run_open_sell_failed", {"city": city_name})
             return False
         drink_after_arrival_if_needed(city_name, route_text, profit_fields)
+        if not ensure_business_page_ready(
+            "sell",
+            city_name,
+            route_text,
+            profit_fields,
+            "到站喝酒检查",
+        ):
+            emit_run_status(
+                "恢复卖出页面失败",
+                f"{city_name} 到站喝酒检查后未能回到卖出页面",
+                route=route_text,
+                current_city=city_name,
+                **profit_fields,
+            )
+            reset_game_after_run_failure("run_restore_sell_after_drink_failed", {"city": city_name})
+            return False
         if not ensure_trade_strength(route_text, profit_fields):
+            return False
+        if not ensure_business_page_ready(
+            "sell",
+            city_name,
+            route_text,
+            profit_fields,
+            "疲劳检查",
+        ):
+            emit_run_status(
+                "恢复卖出页面失败",
+                f"{city_name} 疲劳检查后未能回到卖出页面",
+                route=route_text,
+                current_city=city_name,
+                **profit_fields,
+            )
+            reset_game_after_run_failure("run_restore_sell_after_strength_failed", {"city": city_name})
             return False
         emit_run_status(
             "正在出售商品",
