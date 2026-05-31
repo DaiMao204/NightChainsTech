@@ -41,7 +41,7 @@ MIXED_CURRENCY_PRIORITY_ALIASES = {
 }
 TIRED_DISTANCE_RATIO = 40.0
 GENERAL_PROFIT_INDEX_RESTOCK_FATIGUE_CONSTANT = 33
-PLANNED_HAGGLE_SUCCESS_COUNT = 20
+PLANNED_HAGGLE_PERCENT = 20
 COLUMBA_TRADE_DATA_PATH = RESOURCES_PATH / "goods" / "ColumbaTradeData2026.json"
 COLUMBA_FATIGUE_DATA_PATH = RESOURCES_PATH / "goods" / "CityFatigueData2026.json"
 COLUMBA_LOCAL_MARKET_DATA_PATH = RESOURCES_PATH / "goods" / "ColumbaLocalMarketData2026.json"
@@ -570,6 +570,12 @@ def normalize_roles_config(roles: dict[str, Any] | None) -> dict[str, dict[str, 
             resonance = int(value.get("resonance") or 0)
         else:
             resonance = int(value or 0)
+        if resonance <= 0:
+            resonance = 0
+        elif resonance < 4:
+            resonance = 1
+        elif resonance > 5:
+            resonance = 5
         result[role_name] = {"resonance": resonance}
     return result
 
@@ -619,6 +625,10 @@ def product_unlocked(
     city_status = (options.product_unlock_status_by_city or {}).get(buy_city) or {}
     if product_name in city_status:
         return bool(city_status[product_name])
+    for delimiter in ("/", "\\", "|"):
+        city_key = f"{buy_city}{delimiter}{product_name}"
+        if city_key in global_status:
+            return bool(global_status[city_key])
     return global_status.get(product_name) is not False
 
 
@@ -648,6 +658,12 @@ def get_prestige_config(trade_data: dict[str, Any], city: str, options: RoutePla
             return item
     levels = trade_data.get("prestige_levels") or []
     return levels[-1] if levels else {"generalTax": 0, "specialTax": {}, "extraBuy": 0}
+
+
+def get_prestige_tax_rate(prestige: dict[str, Any], master_city: str) -> float:
+    special_tax = prestige.get("specialTax") or {}
+    city_tax = special_tax.get(master_city)
+    return float(city_tax if city_tax is not None else prestige.get("generalTax", 0))
 
 
 def get_resonance_skill_buy_more_percent(
@@ -805,7 +821,8 @@ def calculate_columba_price_items(
     sell_prestige = get_prestige_config(trade_data, to_city, options)
     from_city_master = get_city_master(trade_data, from_city)
     to_city_master = get_city_master(trade_data, to_city)
-    resonance_tax_cut = get_resonance_skill_tax_cut_percent(trade_data, roles, from_city)
+    buy_resonance_tax_cut = get_resonance_skill_tax_cut_percent(trade_data, roles, from_city)
+    sell_resonance_tax_cut = get_resonance_skill_tax_cut_percent(trade_data, roles, to_city)
     items: list[dict[str, Any]] = []
 
     for product in get_trade_products(trade_data):
@@ -834,23 +851,20 @@ def calculate_columba_price_items(
             buy_price *= 1 - bargain.bargain_percent / 100
             sell_price = js_round(sell_price * (1 + bargain.raise_percent / 100))
 
-        special_buy_tax = (buy_prestige.get("specialTax") or {}).get(from_city_master)
-        buy_tax_rate = float(special_buy_tax if special_buy_tax is not None else buy_prestige.get("generalTax", 0))
+        buy_tax_rate = get_prestige_tax_rate(buy_prestige, from_city_master)
         buy_tax_rate += get_game_event_tax_variation(trade_data, product, from_city, events_config)
-        buy_tax_rate += resonance_tax_cut
+        buy_tax_rate += buy_resonance_tax_cut
 
-        special_sell_tax = (sell_prestige.get("specialTax") or {}).get(to_city_master)
-        sell_tax_rate = float(special_sell_tax if special_sell_tax is not None else sell_prestige.get("generalTax", 0))
-        sell_tax_rate += resonance_tax_cut
+        sell_tax_rate = get_prestige_tax_rate(sell_prestige, to_city_master)
+        sell_tax_rate += sell_resonance_tax_cut
 
         rounded_buy_price = js_round(buy_price)
         rounded_sell_price = js_round(sell_price)
         single_cost = js_round(rounded_buy_price * (1 + buy_tax_rate))
         single_income = js_round(rounded_sell_price * (1 - sell_tax_rate))
-
-        single_profit = sell_price - buy_price
+        single_profit = rounded_sell_price - rounded_buy_price
         single_profit -= single_profit * sell_tax_rate
-        single_profit -= buy_price * (buy_tax_rate + resonance_tax_cut)
+        single_profit -= rounded_buy_price * buy_tax_rate
         single_profit = js_round(single_profit)
         if single_profit < options.min_profit:
             continue
@@ -986,7 +1000,7 @@ def stats_to_route_model(
     if stats.get("bargainDisabled"):
         haggle_num = 0
     elif options.auto_haggle:
-        haggle_num = PLANNED_HAGGLE_SUCCESS_COUNT
+        haggle_num = PLANNED_HAGGLE_PERCENT
     else:
         haggle_num = int((options.haggle_by_city or {}).get(buy_city, 0))
     return RouteModel(
@@ -1325,7 +1339,7 @@ def plan_one_way_route(
     profit = sell_price_total - buy_price_total
     book = (options.max_book_by_city or {}).get(buy_city, int(options.max_restock or 0))
     haggle_num = (
-        PLANNED_HAGGLE_SUCCESS_COUNT
+        PLANNED_HAGGLE_PERCENT
         if options.auto_haggle
         else int((options.haggle_by_city or {}).get(buy_city, 0))
     )

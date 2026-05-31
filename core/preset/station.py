@@ -30,6 +30,8 @@ FIGHT_TIME = 300
 MAP_WAIT_TIME = 3000
 FIGHT_END_TEMPLATE_THRESHOLD = 0.98
 TRAVEL_STATUS_OCR_INTERVAL = 5.0
+TRAVEL_CONTINUE_TAP_INTERVAL = 3.0
+TRAVEL_CONTINUE_POINT = (1248, 616)
 TRAVEL_STATUS_CROP_POS1 = (520, 20)
 TRAVEL_STATUS_CROP_POS2 = (760, 145)
 ROUTE_EVENT_OCR_INTERVAL = 2.0
@@ -146,6 +148,7 @@ class STATION:
         last_collision_tap = 0.0
         collision_taps = 0
         collision_limit_logged = False
+        last_continue_tap = 0.0
         last_logged_status: tuple[str | None, int | None, bool] | None = None
         while time.perf_counter() - start < MAP_WAIT_TIME:
             image = screenshot()
@@ -165,6 +168,14 @@ class STATION:
                         f"巡航={'是' if cruising else '否'}"
                     )
                     last_logged_status = current_status
+                if (
+                    not cruising
+                    and (destination is not None or remaining is not None)
+                    and now - last_continue_tap >= TRAVEL_CONTINUE_TAP_INTERVAL
+                ):
+                    logger.info("行车状态未巡航，点击右下角 D 标志继续前进")
+                    input_tap(TRAVEL_CONTINUE_POINT)
+                    last_continue_tap = now
                 last_status_ocr = now
 
             if now - last_event_ocr >= ROUTE_EVENT_OCR_INTERVAL:

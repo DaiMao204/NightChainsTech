@@ -64,6 +64,12 @@ def _roles(value: dict[str, Any] | None) -> dict[str, dict[str, int]] | None:
             resonance = int(role_value.get("resonance") or 0)
         else:
             resonance = int(role_value or 0)
+        if resonance <= 0:
+            resonance = 0
+        elif resonance < 4:
+            resonance = 1
+        elif resonance > 5:
+            resonance = 5
         result[str(role_name)] = {"resonance": resonance}
     return result
 

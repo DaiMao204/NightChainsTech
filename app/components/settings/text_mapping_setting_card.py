@@ -74,6 +74,8 @@ class TextMappingSettingCard(SettingCard):
                     continue
                 text = "已解锁" if bool(item) else "未解锁"
             else:
+                if isinstance(item, dict):
+                    item = item.get("resonance", 0)
                 text = str(int(item))
             lines.append(f"{key}={text}")
         return "\n".join(lines)

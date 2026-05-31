@@ -25,6 +25,8 @@ class PageKind(str, Enum):
     BUSINESS_MENU = "business_menu"
     BUY_PAGE = "buy_page"
     SELL_PAGE = "sell_page"
+    STRENGTH_PAGE = "strength_page"
+    BENTO_CABINET = "bento_cabinet"
     BUY_REPORT = "buy_report"
     SELL_REPORT = "sell_report"
     GENERIC_POPUP = "generic_popup"
@@ -74,6 +76,8 @@ CITY_TEXTS = ("城市发展度", "声望等级", "隶属于")
 BUSINESS_MENU_TEXTS = ("我要买", "我要卖")
 BUY_PAGE_TEXTS = ("预计买入", "全部买入", "全部取消")
 SELL_PAGE_TEXTS = ("预计卖出", "全部卖出", "全部出售", "全部取消")
+STRENGTH_PAGE_TEXTS = ("FATIGUE", "恢复疲劳", "疲劳值", "列车长疲劳值", "提神", "口香糖", "仙人掌", "桦石", "补充")
+BENTO_CABINET_TEXTS = ("BENTOCABINET", "BOXMEAL", "工作餐", "全部使用", "爱心便当")
 BUY_REPORT_TEXTS = ("买入结算报告", "触碰空白区域退出")
 SELL_REPORT_TEXTS = ("卖出结算报告", "出售结算报告", "触碰空白区域退出")
 GENERIC_POPUP_TEXTS = (
@@ -97,6 +101,12 @@ GENERIC_POPUP_CLOSE_POINTS = ((50, 360), (1230, 360), (640, 700), (100, 100), (1
 START_SCREEN_ENTER_POINT = (640, 360)
 FIGHT_END_CLOSE_POINT = (1151, 626)
 TRADE_PAGE_BACK_POINT = (83, 36)
+TRADE_SWITCH_CROP_POS1 = (0, 560)
+TRADE_SWITCH_CROP_POS2 = (260, 710)
+TRADE_SWITCH_FALLBACK_POINTS = {
+    PageKind.BUY_PAGE: (103, 654),
+    PageKind.SELL_PAGE: (103, 654),
+}
 ROUTE_EVENT_ATTACK_POINT = (1009, 251)
 FIGHT_AUTO_POINT = (159, 44)
 FIGHT_START_CROP_POS1 = (1133, 132)
@@ -233,6 +243,25 @@ def classify_page(image: Any | None = None) -> PageState:
 
     buy_matches = _matched(all_texts, BUY_PAGE_TEXTS)
     sell_matches = _matched(all_texts, SELL_PAGE_TEXTS)
+    bento_matches = _matched(all_texts, BENTO_CABINET_TEXTS)
+    if bento_matches:
+        add(
+            PageKind.BENTO_CABINET,
+            _score_from_matches(bento_matches, 0.86),
+            f"matched OCR texts: {bento_matches}",
+            "return from bento cabinet",
+            bento_matches,
+        )
+
+    strength_matches = _matched(all_texts, STRENGTH_PAGE_TEXTS)
+    if strength_matches and not bento_matches:
+        add(
+            PageKind.STRENGTH_PAGE,
+            _score_from_matches(strength_matches, 0.76),
+            f"matched OCR texts: {strength_matches}",
+            "return from strength page",
+            strength_matches,
+        )
 
     buy_report_matches = _matched(all_texts, BUY_REPORT_TEXTS)
     if "买入结算报告" in buy_report_matches:
@@ -260,8 +289,12 @@ def classify_page(image: Any | None = None) -> PageState:
         for needle in GENERIC_POPUP_FUZZY_TEXTS
         if needle not in generic_popup_matches and any(needle in text for text in all_texts)
     ]
-    if generic_popup_matches and "买入结算报告" not in buy_report_matches and not any(
-        text in sell_report_matches for text in ("卖出结算报告", "出售结算报告")
+    if (
+        generic_popup_matches
+        and not strength_matches
+        and not bento_matches
+        and "买入结算报告" not in buy_report_matches
+        and not any(text in sell_report_matches for text in ("卖出结算报告", "出售结算报告"))
     ):
         add(
             PageKind.GENERIC_POPUP,
@@ -307,6 +340,8 @@ def classify_page(image: Any | None = None) -> PageState:
         PageKind.BUY_PAGE: 80,
         PageKind.SELL_PAGE: 80,
         PageKind.BUSINESS_MENU: 70,
+        PageKind.BENTO_CABINET: 68,
+        PageKind.STRENGTH_PAGE: 67,
         PageKind.STATION_MAP: 65,
         PageKind.ROUTE: 60,
         PageKind.FIGHT: 55,
@@ -344,7 +379,7 @@ def capture_page_state(
         "label": label,
         "image": str(image_path.resolve()),
         "state": asdict(state),
-        "extra": extra or {},
+        "extra": _json_safe(extra or {}),
     }
     json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.warning(
@@ -395,6 +430,32 @@ def _tap_ocr_text(
         input_tap((center_x, center_y))
         return True
     return False
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    return value
+
+
+def _tap_trade_switch_option(target_kind: PageKind) -> bool:
+    option_text = BUSINESS_OPTION_BY_TARGET[target_kind]
+    if _tap_ocr_text(option_text, cropped_pos1=TRADE_SWITCH_CROP_POS1, cropped_pos2=TRADE_SWITCH_CROP_POS2):
+        return True
+    if _tap_ocr_text(option_text):
+        return True
+    point = TRADE_SWITCH_FALLBACK_POINTS.get(target_kind)
+    if not point:
+        return False
+    input_tap(point)
+    return True
 
 
 def find_route_event_attack_point(image: Any | None = None) -> tuple[int, int] | None:
@@ -742,6 +803,10 @@ def recover_page_state(
             actions.append("close_fight_end")
             input_tap(FIGHT_END_CLOSE_POINT)
             time.sleep(1.2)
+        elif state.kind in (PageKind.BENTO_CABINET, PageKind.STRENGTH_PAGE):
+            actions.append(f"back_from_{state.kind.value}")
+            input_tap(TRADE_PAGE_BACK_POINT)
+            time.sleep(1.0)
         elif len(target_kinds) == 1 and target_kinds[0] in BUSINESS_OPTION_BY_TARGET:
             target_kind = target_kinds[0]
             if state.kind == PageKind.BUSINESS_MENU:
@@ -756,9 +821,13 @@ def recover_page_state(
                 actions.append(f"open_{target_kind.value}")
                 time.sleep(1.0)
             elif state.kind in (PageKind.BUY_PAGE, PageKind.SELL_PAGE):
-                actions.append("back_to_business_menu")
-                input_tap(TRADE_PAGE_BACK_POINT)
-                time.sleep(0.8)
+                if _tap_trade_switch_option(target_kind):
+                    actions.append(f"switch_to_{target_kind.value}")
+                    time.sleep(1.0)
+                else:
+                    actions.append("back_to_business_menu")
+                    input_tap(TRADE_PAGE_BACK_POINT)
+                    time.sleep(0.8)
             else:
                 if capture_on_blocked:
                     capture_page_state(

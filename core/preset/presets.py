@@ -86,6 +86,9 @@ def click_station(name: str, cur_station: Optional[str] = None):
     :param cur_station: 当前站点
     """
     logger.info(f"点击站点 => {name}")
+    if cur_station and name == cur_station:
+        logger.info("已在目标站点")
+        return STATION(True, is_destine=True)
     if screenshot().match_template(RESOURCES_PATH / "main_map.png", 0.95) == False:
         logger.info("未检测到主地图界面，返回主地图")
         if not go_home():
@@ -111,7 +114,7 @@ def click_station(name: str, cur_station: Optional[str] = None):
             current_station=station,
             coordinate_first=True,
             route_first=False,
-            fallback_scan=False,
+            fallback_scan=True,
         )
     except MapNavigationError as exc:
         logger.error(f"站点导航失败: {exc}")

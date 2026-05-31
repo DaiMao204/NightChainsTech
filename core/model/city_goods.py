@@ -31,7 +31,7 @@ class RouteModel(BaseModel):
     sell_city_name: str = ""
     """出售城市"""
     haggle_num: int = 0
-    """议价成功次数"""
+    """议价幅度百分比"""
     goods_data: Dict[str, GoodsData] = {}
     """商品数据"""
     buy_goods: Dict[str, int] = {}

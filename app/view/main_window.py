@@ -7,7 +7,7 @@ LastEditors: Night-stars-1 nujj1042633805@gmail.com
 from typing import Union
 
 from PySide6.QtCore import QSize, Qt, QTimer
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import QApplication, QWidget
 from loguru import logger
 from qfluentwidgets import DotInfoBadge
@@ -74,6 +74,7 @@ class MainWindow(MSFluentWindow):
         self.setInterface()
 
         self.initNavigation()
+        self.initShortcuts()
 
         self.connectSignalToSlot()
 
@@ -96,7 +97,7 @@ class MainWindow(MSFluentWindow):
 
     def initNavigation(self):
         self.addSubInterface(self.homeInterface, FIF.HOME, "总览")
-        self.addSubInterface(self.two_run_business_interface, FIF.TRAIN, "跑商配置")
+        self.addSubInterface(self.two_run_business_interface, FIF.TRAIN, "自动跑商")
         self.addSubInterface(self.adb_data_interface, FIF.GAME, "设备连接")
 
         # 底部按钮
@@ -120,6 +121,15 @@ class MainWindow(MSFluentWindow):
             "设置",
             position=NavigationItemPosition.BOTTOM,
         )
+
+    def initShortcuts(self):
+        self.runBusinessShortcut = QShortcut(QKeySequence("Ctrl+Return"), self)
+        self.runBusinessShortcut.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.runBusinessShortcut.activated.connect(self.triggerRunBusinessShortcut)
+
+    def triggerRunBusinessShortcut(self):
+        self.switchTo(self.two_run_business_interface)
+        QTimer.singleShot(120, self.two_run_business_interface.runPlannedBusiness)
 
     def initWindow(self):
         self.resize(960, 780)
@@ -248,7 +258,7 @@ class MainWindow(MSFluentWindow):
         self._prestigePromptShown = True
 
         content = (
-            "当前为账号配置自动读取模式，但货舱或主城声望配置不完整。\n"
+            "当前为账号配置自动读取模式，但货舱、主城声望或乘员共振配置不完整。\n"
             f"{'；'.join(reasons)}\n\n"
             "需要先读取账号配置，才能进行自动规划或跑商。"
         )

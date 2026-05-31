@@ -6,6 +6,7 @@ class SignalBus(QObject):
 
     switchToCard = Signal(str)
     configChanged = Signal(str, str)
+    fatigueResourceCountChanged = Signal(object, int)
     runStatusChanged = Signal(dict)
     deviceConnected = Signal()
 

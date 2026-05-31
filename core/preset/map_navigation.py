@@ -53,8 +53,8 @@ NAV_TARGET_Y_MIN = 140
 NAV_TARGET_Y_MAX = 585
 NAV_TARGET_CENTER_X = (NAV_TARGET_X_MIN + NAV_TARGET_X_MAX) // 2
 NAV_TARGET_CENTER_Y = (NAV_TARGET_Y_MIN + NAV_TARGET_Y_MAX) // 2
-MIN_COORDINATE_DRAG_DISTANCE = 160
-MAX_COORDINATE_DRAG_DISTANCE = 420
+MIN_COORDINATE_DRAG_DISTANCE = 120
+MAX_COORDINATE_DRAG_DISTANCE = 340
 
 
 @dataclass
@@ -301,7 +301,7 @@ def close_city_panel():
     return True
 
 
-def zoom_out(times: int = 8):
+def zoom_out(times: int = 3):
     for _ in range(times):
         input_tap_exact((1152, 584))
         time.sleep(0.12)
@@ -319,7 +319,7 @@ def drag_view(direction: str, distance: int = 520, duration: int = 900):
         input_swipe((640, 220), (640, 220 + distance), duration)
     else:
         raise ValueError(f"Unsupported map drag direction: {direction}")
-    time.sleep(0.9)
+    time.sleep(0.55 if duration <= 650 else 0.68)
 
 
 def is_right_zoom_control(point: tuple[int, int]) -> bool:
@@ -374,7 +374,15 @@ def clamp_map_point(point: tuple[int, int]) -> tuple[int, int]:
 
 def probe_offsets(point: tuple[int, int]) -> list[tuple[int, int]]:
     if not is_edge_point(point):
-        return [(0, 0)]
+        return [
+            (0, 0),
+            (0, -28),
+            (-24, -18),
+            (24, -18),
+            (-28, 0),
+            (28, 0),
+            (0, 24),
+        ]
 
     offsets = [(0, 0)]
     if point[0] < EDGE_X_MARGIN:
@@ -415,7 +423,7 @@ def drag_edge_point_towards_inner(point: tuple[int, int], distance: int = 220) -
 
 
 def reset_to_northwest(
-    zoom_times: int = 8,
+    zoom_times: int = 3,
     west_times: int = 10,
     north_times: int = 8,
     duration: int = 900,
@@ -640,7 +648,7 @@ def probe_city_point(
             return CityProbe(screen_point=probe_point, panel=panel, row=row, column=column)
 
         close_city_panel()
-        return None
+        continue
 
     close_city_panel()
     return None
@@ -673,6 +681,14 @@ def is_navigation_target_safe(point: tuple[int, int]) -> bool:
         NAV_TARGET_X_MIN <= x <= NAV_TARGET_X_MAX
         and NAV_TARGET_Y_MIN <= y <= NAV_TARGET_Y_MAX
         and is_valid_map_point(point)
+    )
+
+
+def is_navigation_target_near_safe(point: tuple[int, int], margin: int = 320) -> bool:
+    x, y = point
+    return (
+        NAV_TARGET_X_MIN - margin <= x <= NAV_TARGET_X_MAX + margin
+        and NAV_TARGET_Y_MIN - margin <= y <= NAV_TARGET_Y_MAX + margin
     )
 
 
@@ -738,6 +754,19 @@ def scan_coordinate_city(
         location = locate_map_view(image)
         if not location:
             logger.warning("未能通过站点星座定位当前地图视口")
+            if last_target_point and is_navigation_target_near_safe(last_target_point):
+                visible_probe = scan_visible_city(
+                    target_name,
+                    row=-2,
+                    column=step,
+                    limit=8,
+                    allow_edge_recenter=True,
+                    use_sample_points=False,
+                    use_icon_candidates=False,
+                )
+                if visible_probe:
+                    logger.info(f"定位丢失后当前视口已确认目标站点: {target_name} @ {visible_probe.screen_point}")
+                    return visible_probe
             return None
 
         names = ", ".join(match.name for match in location.matches)
@@ -764,7 +793,19 @@ def scan_coordinate_city(
             if probe:
                 logger.info(f"坐标定位已确认目标站点: {target_name} @ {probe.screen_point}")
                 return probe
-            logger.warning(f"坐标定位点击未确认 {target_name}，停止坐标流程并交给兜底扫描")
+            visible_probe = scan_visible_city(
+                target_name,
+                row=-2,
+                column=step,
+                limit=8,
+                allow_edge_recenter=False,
+                use_sample_points=False,
+                use_icon_candidates=False,
+            )
+            if visible_probe:
+                logger.info(f"坐标点附近可见扫描已确认目标站点: {target_name} @ {visible_probe.screen_point}")
+                return visible_probe
+            logger.warning(f"坐标定位点击未确认 {target_name}，交给兜底扫描")
             return None
 
         if not drag_projected_target_towards_safe_area(target_point, drag_distance=drag_distance):
@@ -772,6 +813,19 @@ def scan_coordinate_city(
             return None
 
     logger.warning(f"坐标定位 {max_steps} 次移动后仍未让目标进入安全点击区: {target_name}")
+    if last_target_point and is_navigation_target_near_safe(last_target_point):
+        visible_probe = scan_visible_city(
+            target_name,
+            row=-2,
+            column=max_steps,
+            limit=8,
+            allow_edge_recenter=True,
+            use_sample_points=False,
+            use_icon_candidates=False,
+        )
+        if visible_probe:
+            logger.info(f"坐标步数耗尽后当前视口已确认目标站点: {target_name} @ {visible_probe.screen_point}")
+            return visible_probe
     return None
 
 
@@ -781,10 +835,16 @@ def scan_visible_city(
     column: int = 0,
     limit: int = 35,
     allow_edge_recenter: bool = True,
+    use_sample_points: bool = True,
+    use_icon_candidates: bool = True,
 ) -> CityProbe | None:
     close_city_panel()
     image = screenshot_image()
-    candidates = prioritize_candidates(target_name, find_icon_candidates(image))[:limit]
+    candidates = (
+        prioritize_candidates(target_name, find_icon_candidates(image))[:limit]
+        if use_icon_candidates
+        else []
+    )
     inner_candidates = [point for point in candidates if is_safe_inner_point(point)]
     deferred_candidates = [point for point in candidates if not is_safe_inner_point(point)]
     logger.info(
@@ -808,6 +868,8 @@ def scan_visible_city(
                 column=column,
                 limit=limit,
                 allow_edge_recenter=False,
+                use_sample_points=use_sample_points,
+                use_icon_candidates=use_icon_candidates,
             )
 
         for point in label_probe.click_points:
@@ -815,13 +877,14 @@ def scan_visible_city(
             if probe:
                 return probe
 
-    sample_points = city_sample_points(target_name)
-    if sample_points:
-        logger.info(f"目标历史样本候选点: {sample_points}")
-    for point in sample_points:
-        probe = probe_city_point(point, target_name, row, column)
-        if probe:
-            return probe
+    if use_sample_points:
+        sample_points = city_sample_points(target_name)
+        if sample_points:
+            logger.info(f"目标历史样本候选点: {sample_points}")
+        for point in sample_points:
+            probe = probe_city_point(point, target_name, row, column)
+            if probe:
+                return probe
 
     for point in inner_candidates:
         probe = probe_city_point(point, target_name, row, column)

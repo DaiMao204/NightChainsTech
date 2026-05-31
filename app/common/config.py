@@ -17,7 +17,6 @@ from version import __version__
 class RunningBusinessConfig(QConfig):
     """Config of application"""
 
-    BuyCount = ConfigItem("RunBuy", "BuyCount", 0, None)
     RunBook = ConfigItem("RunBuy", "Book", 0, None)
     RunOutboundBook = ConfigItem("RunBuy", "OutboundBook", 0, None)
     RunReturnBook = ConfigItem("RunBuy", "ReturnBook", 0, None)
@@ -84,7 +83,7 @@ class Config(RunningBusinessConfig):
     tradePlannerCandidateMode = ConfigItem("TradePlanner", "CandidateMode", "best", None)
     tradePlannerConfigPath = ConfigItem("TradePlanner", "ConfigPath", "", None)
     tradePlannerMaxLot = ConfigItem("TradePlanner", "MaxLot", 1136, None)
-    tradePlannerMaxRestock = ConfigItem("TradePlanner", "MaxRestock", 4, None)
+    tradePlannerMaxRestock = ConfigItem("TradePlanner", "MaxRestock", 6, None)
     tradePlannerBargainPercent = ConfigItem("TradePlanner", "BargainPercent", 20, None)
     tradePlannerRaisePercent = ConfigItem("TradePlanner", "RaisePercent", 20, None)
     tradePlannerBargainFatigue = ConfigItem("TradePlanner", "BargainFatigue", 20, None)
@@ -94,8 +93,8 @@ class Config(RunningBusinessConfig):
     tradePlannerPrestigeLevelThresholds = ConfigItem("TradePlanner", "PrestigeLevelThresholds", {}, None)
     tradePlannerPrestigeByCity = ConfigItem("TradePlanner", "PrestigeByCity", {}, None)
     tradePlannerRoleResonance = ConfigItem("TradePlanner", "RoleResonance", {}, None)
+    tradePlannerUseDefaultRoles = ConfigItem("TradePlanner", "UseDefaultRoles", True, None)
     tradePlannerDisabledRoles = ConfigItem("TradePlanner", "DisabledRoles", [], None)
-    tradePlannerUseDefaultProductUnlockStatus = ConfigItem("TradePlanner", "UseDefaultProductUnlockStatus", False, None)
     tradePlannerProductUnlockStatus = ConfigItem("TradePlanner", "ProductUnlockStatus", {}, None)
     tradePlannerProductUnlockStatusByCity = ConfigItem("TradePlanner", "ProductUnlockStatusByCity", {}, None)
     tradePlannerBlockedGoods = ConfigItem("TradePlanner", "BlockedGoods", [], None)

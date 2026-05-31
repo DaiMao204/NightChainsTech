@@ -37,8 +37,6 @@ class GlobalModel(BaseModel):
 class RunBuyModel(BaseModel):
     """进货"""
 
-    BuyCount: int = 0
-    """运行次数"""
     Book: int = 0
     """固定进货书数量"""
     OutboundBook: int = 0
@@ -48,13 +46,13 @@ class RunBuyModel(BaseModel):
     UsePlannerBook: bool = True
     """是否使用规划器推荐进货书数量"""
     UsePlannerHaggle: bool = True
-    """是否使用规划器推荐议价成功次数"""
+    """是否使用规划器推荐议价幅度"""
     HaggleNum: int = 0
-    """全局议价成功次数"""
+    """全局议价幅度百分比"""
     OutboundHaggleNum: int = 0
-    """去程固定议价成功次数"""
+    """去程固定议价幅度百分比"""
     ReturnHaggleNum: int = 0
-    """回程固定议价成功次数"""
+    """回程固定议价幅度百分比"""
     UseStrengthMedicine: bool = False
     """是否使用体力药"""
     StrengthLollipopCount: int = 0
@@ -87,7 +85,7 @@ class TradePlannerModel(BaseModel):
     CandidateMode: str = "best"
     ConfigPath: str = ""
     MaxLot: int = 1136
-    MaxRestock: int = 4
+    MaxRestock: int = 6
     BargainPercent: int = 20
     RaisePercent: int = 20
     BargainFatigue: int = 20
@@ -97,6 +95,7 @@ class TradePlannerModel(BaseModel):
     PrestigeLevelThresholds: dict = Field(default_factory=dict)
     PrestigeByCity: dict = Field(default_factory=dict)
     RoleResonance: dict = Field(default_factory=dict)
+    UseDefaultRoles: bool = True
     DisabledRoles: List[str] = Field(default_factory=list)
     ProductUnlockStatus: dict = Field(default_factory=dict)
     ProductUnlockStatusByCity: dict = Field(default_factory=dict)

@@ -112,8 +112,13 @@ cache/
 gui/
 examples/
 test*.py
+!tools/test_page_recovery.py
+!tools/test_station_wait.py
 config*
 !config.py
+!app/common/config_change.py
+!auto/run_business/config_updates.py
+.runtime/
 temp/
 .pdm-build/
 *.prof

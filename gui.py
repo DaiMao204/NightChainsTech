@@ -39,5 +39,7 @@ translator = FluentTranslator()
 app.installTranslator(translator)
 
 w = MainWindow()
-w.show()
+w.showNormal()
+w.raise_()
+w.activateWindow()
 app.exec()

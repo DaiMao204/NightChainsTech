@@ -11,10 +11,10 @@ import time
 from loguru import logger
 
 from app.common.runtime_status import emit_run_status
+from auto.module.strength import recover_strength_by_config
 from core.control.control import input_swipe, input_tap, screenshot
 from core.module.bgr import BGR
 from core.preset import find_text
-from core.preset.control import wait_gbr
 from core.preset.page_state import PageKind, capture_page_state, classify_page, recover_trade_page
 from core.utils.runtime_state import capture_state, has_any_text, ocr_texts
 
@@ -26,9 +26,14 @@ SELL_SELECT_ATTEMPTS = 5
 SELL_CONFIRM_ATTEMPTS = 5
 SELL_GOOD_CLICK_Y_MAX = 620
 SELL_GOOD_SAFE_Y_MAX = 585
+SELL_GOOD_NAME_CROP_POS1 = (622, 136)
+SELL_GOOD_NAME_CROP_POS2 = (854, 685)
+SELL_LIST_STUCK_LIMIT = 2
 HAGGLE_PERCENT_LIMIT = 20
 HAGGLE_PERCENT_CROP_POS1 = (988, 450)
 HAGGLE_PERCENT_CROP_POS2 = (1042, 475)
+FATIGUE_BLOCKED_BGR = [62, 63, 63]
+SELL_SELECT_ALL_TEXTS = ("全部卖出", "全部出售")
 
 
 def ensure_sell_page(label: str = "sell_not_on_page") -> bool:
@@ -49,6 +54,20 @@ def ensure_sell_page(label: str = "sell_not_on_page") -> bool:
         },
     )
     return False
+
+
+def recover_sell_strength(context: str, label: str) -> bool:
+    logger.info("疲劳不足")
+    capture_state(label)
+    capture_page_state(label)
+    emit_run_status("体力不足", f"{context}疲劳不足，正在按疲劳设置恢复")
+    if not recover_strength_by_config():
+        emit_run_status("体力不足", "疲劳恢复失败，跑商已停止")
+        return False
+    if not ensure_sell_page(f"{label}_after_recovery"):
+        emit_run_status("恢复失败", "恢复疲劳后未能回到卖出页面")
+        return False
+    return True
 
 
 def sell_business(num=0, goods: list[str] | None = None):
@@ -101,7 +120,7 @@ def sell_business(num=0, goods: list[str] | None = None):
         return False
     else:
         if num > 0:
-            emit_run_status("正在议价", f"目标议价成功次数：{num}")
+            emit_run_status("正在议价", f"目标抬价幅度：{min(int(num), HAGGLE_PERCENT_LIMIT)}%")
             if not click_bargain_button(num):
                 capture_state("sell_bargain_failed", extra={"num": num})
                 capture_page_state("sell_bargain_failed", extra={"num": num})
@@ -115,19 +134,106 @@ def sell_business(num=0, goods: list[str] | None = None):
         return close_sell_report()
 
 
+def tap_sell_select_all(image=None) -> bool:
+    image = image or screenshot()
+    for item in image.ocr():
+        text = item.get("text", "").replace(" ", "")
+        if not any(label in text for label in SELL_SELECT_ALL_TEXTS):
+            continue
+        position = item["position"]
+        center_x = int((position[0][0] + position[2][0]) / 2)
+        center_y = int((position[0][1] + position[2][1]) / 2)
+        input_tap((center_x, center_y))
+        return True
+    input_tap((1187, 103))
+    return True
+
+
+def _ocr_tap_text(texts: tuple[str, ...], cropped_pos1=(0, 0), cropped_pos2=(0, 0)) -> bool:
+    image = screenshot()
+    image.crop_image(cropped_pos1, cropped_pos2)
+    for item in image.ocr():
+        item_text = str(item.get("text", "")).replace(" ", "")
+        if not any(text in item_text for text in texts):
+            continue
+        position = item["position"]
+        center_x = int((position[0][0] + position[2][0]) / 2)
+        center_y = int((position[0][1] + position[2][1]) / 2)
+        input_tap((center_x, center_y))
+        return True
+    return False
+
+
+def select_all_sell_goods(max_attempts: int = SELL_SELECT_ATTEMPTS) -> bool:
+    if not is_empty_goods():
+        return True
+    for attempt in range(1, max_attempts + 1):
+        image = screenshot()
+        if not is_sell_page(image):
+            capture_state("sell_select_all_not_on_page", image, extra={"attempt": attempt})
+            capture_page_state("sell_select_all_not_on_page", image, extra={"attempt": attempt})
+            return False
+        tap_sell_select_all(image)
+        time.sleep(0.6)
+        if not is_empty_goods():
+            return True
+    return False
+
+
+def sell_all_if_any(num: int = 0, *, empty_ok: bool = True) -> bool:
+    """Sell all currently selectable cargo, treating empty cargo as success."""
+    if not ensure_sell_page("sell_all_if_any_start_not_on_page"):
+        return False
+    emit_run_status("正在清空货柜", "正在检查是否有遗留货物")
+    if not select_all_sell_goods():
+        if empty_ok:
+            logger.info("未检测到可出售的遗留货物，跳过清空货柜")
+            return True
+        capture_state("sell_all_if_any_select_failed")
+        capture_page_state("sell_all_if_any_select_failed")
+        return False
+
+    if num > 0:
+        emit_run_status("正在清空货柜", f"遗留货物抬价到 {min(int(num), HAGGLE_PERCENT_LIMIT)}%")
+        if not click_bargain_button(num):
+            capture_state("sell_all_if_any_bargain_failed", extra={"num": num})
+            capture_page_state("sell_all_if_any_bargain_failed", extra={"num": num})
+            return False
+    emit_run_status("正在清空货柜", "正在出售遗留货物")
+    if not click_sell_button():
+        capture_state("sell_all_if_any_confirm_failed")
+        capture_page_state("sell_all_if_any_confirm_failed")
+        return False
+    time.sleep(0.5)
+    return close_sell_report()
+
+
 def is_sell_page(image=None):
     return has_any_text(ocr_texts(image), SELL_PAGE_TEXTS)
 
 
 def close_sell_report():
     for attempt in range(1, 4):
-        texts = ocr_texts()
-        if not has_any_text(texts, SELL_REPORT_TEXTS):
+        image = screenshot()
+        texts = ocr_texts(image)
+        state = classify_page(image)
+        if state.kind in (PageKind.BUSINESS_MENU, PageKind.SELL_PAGE, PageKind.BUY_PAGE):
+            return True
+        if state.kind != PageKind.SELL_REPORT and not has_any_text(texts, SELL_REPORT_TEXTS):
             return True
         input_tap((896, 676))
         time.sleep(0.5)
-    capture_state("sell_report_close_failed", extra={"attempts": attempt})
-    capture_page_state("sell_report_close_failed", extra={"attempts": attempt})
+
+    image = screenshot()
+    texts = ocr_texts(image)
+    state = classify_page(image)
+    if state.kind in (PageKind.BUSINESS_MENU, PageKind.SELL_PAGE, PageKind.BUY_PAGE):
+        return True
+    if state.kind != PageKind.SELL_REPORT and not has_any_text(texts, SELL_REPORT_TEXTS):
+        return True
+
+    capture_state("sell_report_close_failed", image, extra={"attempts": attempt, "state": state.kind.value})
+    capture_page_state("sell_report_close_failed", image, extra={"attempts": attempt, "state": state.kind.value})
     return False
 
 
@@ -179,13 +285,27 @@ def sell_good_click_points(pos: tuple[int, int]) -> list[tuple[int, int]]:
     return points
 
 
+def visible_sell_goods_signature() -> tuple[str, ...]:
+    image = screenshot()
+    image.crop_image(SELL_GOOD_NAME_CROP_POS1, SELL_GOOD_NAME_CROP_POS2)
+    entries: list[tuple[int, str]] = []
+    for item in image.ocr():
+        text = str(item.get("text", "")).replace(" ", "").strip()
+        if not text:
+            continue
+        position = item["position"]
+        center_y = int((position[0][1] + position[2][1]) / 2)
+        entries.append((center_y, text))
+    return tuple(text for _, text in sorted(entries, key=lambda item: item[0]))
+
+
 def sell_good(good: str) -> bool:
     logger.info(f"正在选择出售: {good}")
     emit_run_status("正在选择出售商品", f"正在选择 {good}", goods=[good])
     pos, _ = find_text(
         good,
-        cropped_pos1=(622, 136),
-        cropped_pos2=(854, 685),
+        cropped_pos1=SELL_GOOD_NAME_CROP_POS1,
+        cropped_pos2=SELL_GOOD_NAME_CROP_POS2,
         log=False,
     )
     if not pos:
@@ -195,8 +315,8 @@ def sell_good(good: str) -> bool:
         time.sleep(0.8)
         pos, _ = find_text(
             good,
-            cropped_pos1=(622, 136),
-            cropped_pos2=(854, 685),
+            cropped_pos1=SELL_GOOD_NAME_CROP_POS1,
+            cropped_pos2=SELL_GOOD_NAME_CROP_POS2,
             log=False,
         )
         if not pos:
@@ -225,21 +345,50 @@ def sell_good(good: str) -> bool:
 def find_sell_good(good: str, timeout: float = 30.0) -> tuple[int, int] | None:
     start = time.perf_counter()
     scan_step = 0
+    last_signature: tuple[str, ...] | None = None
+    last_direction: str | None = None
+    stuck_count = 0
     while (spend_time := time.perf_counter() - start) < timeout:
         if scan_step < 8:
+            direction = "down"
             input_swipe((700, 620), (700, 170), swipe_time=800)
         else:
+            direction = "up"
             input_swipe((700, 170), (700, 620), swipe_time=800)
         scan_step += 1
-        time.sleep(1.0)
+        time.sleep(0.7)
         pos, _ = find_text(
             good,
-            cropped_pos1=(622, 136),
-            cropped_pos2=(854, 685),
+            cropped_pos1=SELL_GOOD_NAME_CROP_POS1,
+            cropped_pos2=SELL_GOOD_NAME_CROP_POS2,
             log=False,
         )
         if pos:
             return pos
+        signature = visible_sell_goods_signature()
+        if signature and signature == last_signature and direction == last_direction:
+            stuck_count += 1
+        else:
+            stuck_count = 0
+        last_signature = signature
+        last_direction = direction
+        if stuck_count < SELL_LIST_STUCK_LIMIT:
+            continue
+        if direction == "down" and scan_step < 8:
+            logger.info(
+                "卖出商品列表向下滑动后可见商品未变化，判断已到底，提前改为向上查找: "
+                f"target={good} visible={'->'.join(signature)}"
+            )
+            scan_step = 8
+            stuck_count = 0
+            last_signature = None
+            last_direction = None
+            continue
+        logger.warning(
+            "卖出商品列表滑动后可见商品未变化，判断已到边界或卡住，停止继续拖动: "
+            f"target={good} direction={direction} visible={'->'.join(signature)}"
+        )
+        break
     capture_state("sell_find_good_timeout", extra={"good": good, "timeout": timeout})
     capture_page_state("sell_find_good_timeout", extra={"good": good, "timeout": timeout})
     return None
@@ -261,16 +410,18 @@ def click_bargain_button(num=0):
     说明:
         点击议价按钮
     参数:
-        :param num: 议价成功次数
+        :param num: 目标议价幅度百分比
     """
-    logger.info(f"议价成功次数: {num}")
+    target_percent = min(int(num or 0), HAGGLE_PERCENT_LIMIT)
+    logger.info(f"目标抬价幅度: {target_percent}%")
     start = time.perf_counter()
     while time.perf_counter() - start < 15:
-        if num <= 0:
+        if target_percent <= 0:
             return True
         raised_percent = read_raise_percent()
-        if raised_percent is not None and raised_percent >= HAGGLE_PERCENT_LIMIT:
-            logger.info("抬价已达到20%，停止继续议价")
+        logger.info(f"当前抬价幅度: {raised_percent}%")
+        if raised_percent is not None and raised_percent >= target_percent:
+            logger.info(f"抬价已达到目标 {target_percent}%，停止继续议价")
             return True
         image = screenshot()
         bgr = image.get_bgr((1176, 461))
@@ -281,23 +432,13 @@ def click_bargain_button(num=0):
         elif bgr == [251, 253, 253]:
             logger.info("抬价次数不足")
             return True
-        elif bgr == [62, 63, 63]:
-            logger.info("疲劳不足")
-            input_tap((83, 36))
-            return True
-        image = screenshot()
-        image.crop_image((516, 224), (787, 439))
-        hsv = image.get_hsv((626, 273))
-        logger.debug(f"抬价是否成功颜色检查(HSV): {hsv}")
-        if 30 <= hsv[0] <= 40:
-            logger.info("抬价成功")
-            num -= 1
-        else:
-            logger.info("抬价失败")
-        # 等待降价动画消失
-        wait_gbr((629, 101), BGR(30, 50, 65), BGR(40, 60, 75))
-    capture_state("sell_bargain_timeout", extra={"remaining_num": num})
-    capture_page_state("sell_bargain_timeout", extra={"remaining_num": num})
+        elif bgr == FATIGUE_BLOCKED_BGR:
+            if recover_sell_strength("卖出抬价", "sell_bargain_strength_insufficient"):
+                return True
+            return False
+        time.sleep(0.5)
+    capture_state("sell_bargain_timeout", extra={"target_percent": target_percent})
+    capture_page_state("sell_bargain_timeout", extra={"target_percent": target_percent})
     return False
 
 
@@ -317,12 +458,22 @@ def click_sell_button():
         state = classify_page(image)
         if state.kind == PageKind.SELL_REPORT:
             return True
+        if bgr == FATIGUE_BLOCKED_BGR:
+            if recover_sell_strength("确认卖出", "sell_confirm_strength_insufficient"):
+                continue
+            return False
         if bgr == [227, 131, 82]:
             logger.info("检测到包含本地商品")
             input_tap((975, 498))
             time.sleep(0.5)
+        if state.kind in (PageKind.SELL_PAGE, PageKind.GENERIC_POPUP):
+            logger.info("卖出确认后仍停留在交易界面，可能为行情变动提示，继续确认")
+            _ocr_tap_text(("确认", "确定"), cropped_pos1=(880, 450), cropped_pos2=(1080, 640))
+            continue
         if bgr != [0, 183, 253] and bgr != [227, 131, 82] and bgr != [251, 253, 253]:
-            return True
+            time.sleep(0.8)
+            if has_any_text(ocr_texts(), SELL_REPORT_TEXTS) or classify_page().kind == PageKind.SELL_REPORT:
+                return True
         capture_state("sell_confirm_retry", image, extra={"attempt": attempt, "bgr": list(bgr)})
         capture_page_state("sell_confirm_retry", image, extra={"attempt": attempt, "bgr": list(bgr)})
     capture_state("sell_confirm_attempts_exhausted", extra={"attempts": SELL_CONFIRM_ATTEMPTS})

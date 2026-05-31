@@ -75,7 +75,7 @@ class HomeInterface(ScrollArea):
         quickStartView = ButtonCardView("快速入口", parent=self.view)
         quickStartView.addSampleCard(
             icon=FIF.TRAIN,
-            title="跑商配置",
+            title="自动跑商",
             content="规划路线、查看利润并执行自动跑商",
             func=lambda: None,
             routekey="TwoCityRunnBusinessInterface",

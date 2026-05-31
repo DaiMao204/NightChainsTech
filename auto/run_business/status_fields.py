@@ -35,14 +35,9 @@ def _leg_text(leg: Any) -> str:
 
 def routes_status_overview(routes: RoutesModel) -> str:
     legs = routes.city_data or []
-    parts = [_route_text(routes), _route_profit_text(routes)]
-    if routes.book is not None and routes.book >= 0:
-        parts.append(f"共{routes.book}书")
-    if routes.city_tired is not None:
-        parts.append(f"总疲劳{routes.city_tired}")
-    leg_text = " | ".join(_leg_text(leg) for leg in legs)
-    overview = "，".join(part for part in parts if part)
-    return f"{overview}；{leg_text}" if leg_text else overview
+    lines = [f"路线：{_route_text(routes)}"]
+    lines.extend(_leg_text(leg) for leg in legs[:2])
+    return "\n".join(line for line in lines if line)
 
 
 def _with_optional_currency_fields(fields: dict[str, Any], source: Any) -> dict[str, Any]:

@@ -10,7 +10,8 @@ from typing import Dict, Optional
 
 from loguru import logger
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtGui import QIntValidator
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
     CheckBox,
     ComboBox,
@@ -19,9 +20,9 @@ from qfluentwidgets import (
     InfoBar,
     MessageBox,
     PushButton,
+    LineEdit,
     ScrollArea,
     SettingCard,
-    SpinBox,
     SwitchSettingCard,
     qconfig,
 )
@@ -30,7 +31,13 @@ from qfluentwidgets import FluentIcon as FIF
 from app.common.account_config import (
     account_config_auto_enabled,
     account_config_mode,
+    configured_role_resonance_names,
     missing_account_config_reasons,
+    missing_prestige_cities,
+    missing_role_resonance_names,
+    missing_unavailable_cities_config,
+    newly_added_missing_role_resonance_names,
+    role_catalog_names,
 )
 from app.common.config import cfg
 from app.common.config_change import emit_config_changed
@@ -40,9 +47,11 @@ from app.common.style_sheet import StyleSheet
 from app.components.primary_push_load_card import PrimaryPushLoadCard
 from app.components.settings.checkbox_group_card import CheckboxGroup
 from app.components.settings.spin_box_setting_card import SpinBoxSettingCard
+from app.components.settings.text_list_setting_card import TextListSettingCard
 from app.components.settings.text_mapping_setting_card import TextMappingSettingCard
 from app.utils.config import CITYS
 from app.utils.worker import Worker
+from core.utils.utils import RESOURCES_PATH, read_json
 
 CITY_SELECTION_MODE_LABELS = {
     "auto": "自动规划",
@@ -81,94 +90,250 @@ CANDIDATE_MODE_COUNTS = {
 }
 
 
+def _planner_city_list() -> list[str]:
+    data = read_json(RESOURCES_PATH / "goods" / "ColumbaTradeData2026.json", {})
+    cities = data.get("cities") if isinstance(data, dict) else []
+    if isinstance(cities, list):
+        result = [str(city).strip() for city in cities if str(city).strip()]
+        if result:
+            return result
+    return CITYS
+
+
+PLANNER_CITYS = _planner_city_list()
+
+
+def _planner_role_list() -> list[str]:
+    catalog_roles = role_catalog_names()
+    if catalog_roles:
+        return catalog_roles
+
+    data = read_json(RESOURCES_PATH / "goods" / "ColumbaTradeData2026.json", {})
+    roles: list[str] = []
+    seen: set[str] = set()
+    def add_role_names(names):
+        for role in names or []:
+            role_name = str(role).strip()
+            if not role_name or role_name in seen:
+                continue
+            seen.add(role_name)
+            roles.append(role_name)
+
+    if isinstance(data, dict):
+        add_role_names((data.get("resonance_skills") or {}).keys())
+        add_role_names((data.get("default_roles") or {}).keys())
+        default_config = data.get("default_player_config") or {}
+        add_role_names((default_config.get("roles") or {}).keys())
+    return roles
+
+
+PLANNER_ROLES = _planner_role_list()
+ROLE_RESONANCE_UNOWNED = -1
+ROLE_RESONANCE_VALUES = (ROLE_RESONANCE_UNOWNED, 0, 1, 2, 3, 4, 5)
+ROLE_RESONANCE_LABELS = {
+    ROLE_RESONANCE_UNOWNED: "未拥有",
+    0: "共振0",
+    1: "共振1",
+    2: "共振2",
+    3: "共振3",
+    4: "共振4",
+    5: "共振5",
+}
+
+
+def _role_resonance_level(value) -> int:
+    if isinstance(value, dict):
+        value = value.get("resonance", ROLE_RESONANCE_UNOWNED)
+    try:
+        if value is None or value == "":
+            return ROLE_RESONANCE_UNOWNED
+        level = int(value)
+    except (TypeError, ValueError):
+        return ROLE_RESONANCE_UNOWNED
+    return level if level in ROLE_RESONANCE_VALUES else ROLE_RESONANCE_UNOWNED
+
+
+def _planner_default_role_levels() -> dict[str, int]:
+    data = read_json(RESOURCES_PATH / "goods" / "ColumbaTradeData2026.json", {})
+    if not isinstance(data, dict):
+        return {}
+    default_config = data.get("default_player_config") or {}
+    roles = default_config.get("roles") or data.get("default_roles") or {}
+    return {
+        str(role).strip(): _role_resonance_level(value)
+        for role, value in dict(roles or {}).items()
+        if str(role).strip()
+    }
+
+
+class PlanningCityCheckBox(CheckBox):
+    """Tri-state city selector: blank=normal, checked=forced, partial=excluded."""
+
+    def __init__(self, city_name: str, parent=None):
+        super().__init__(parent)
+        self.city_name = city_name
+        self.setTristate(True)
+        self.setText(city_name)
+
+    def nextCheckState(self):
+        state = self.checkState()
+        if state == Qt.CheckState.Unchecked:
+            self.setCheckState(Qt.CheckState.Checked)
+        elif state == Qt.CheckState.Checked:
+            self.setCheckState(Qt.CheckState.PartiallyChecked)
+        else:
+            self.setCheckState(Qt.CheckState.Unchecked)
+
+    def setPlanningState(self, state: Qt.CheckState):
+        self.setCheckState(state)
+        self.refreshText()
+
+    def refreshText(self):
+        if self.checkState() == Qt.CheckState.Checked:
+            self.setText(f"{self.city_name}（指定）")
+        elif self.checkState() == Qt.CheckState.PartiallyChecked:
+            self.setText(f"✕ {self.city_name}")
+        else:
+            self.setText(self.city_name)
+
+
 class ManualRouteSettingCard(SettingCard):
     def __init__(self, parent=None):
         super().__init__(
             FIF.TRAIN,
             "手动双城",
-            "选择往返的两座城市；去程和回程只是配置标签，实际执行会从当前更近的一端开始",
+            "选择往返两座城市",
             parent,
         )
         self.startComboBox = ComboBox(self)
         self.targetComboBox = ComboBox(self)
-        self.startComboBox.addItems(CITYS)
-        self.targetComboBox.addItems(CITYS)
-        self.startComboBox.setCurrentText(cfg.tradePlannerManualStartCity.value or (CITYS[0] if CITYS else ""))
+        self.startComboBox.addItems(PLANNER_CITYS)
+        self.targetComboBox.addItems(PLANNER_CITYS)
+        self.startComboBox.setCurrentText(
+            cfg.tradePlannerManualStartCity.value or (PLANNER_CITYS[0] if PLANNER_CITYS else "")
+        )
         self.targetComboBox.setCurrentText(
             cfg.tradePlannerManualTargetCity.value
-            or (CITYS[1] if len(CITYS) > 1 else (CITYS[0] if CITYS else ""))
+            or (PLANNER_CITYS[1] if len(PLANNER_CITYS) > 1 else (PLANNER_CITYS[0] if PLANNER_CITYS else ""))
         )
+        self.startComboBox.setFixedWidth(132)
+        self.targetComboBox.setFixedWidth(132)
+
+        self.returnStartLabel = self._create_city_label(self.targetComboBox.currentText())
+        self.returnTargetLabel = self._create_city_label(self.startComboBox.currentText())
 
         self.outboundWidget = self._create_leg_widget(
             "去程",
             cfg.RunOutboundBook,
             cfg.RunOutboundHaggleNum,
+            self.startComboBox,
+            self.targetComboBox,
         )
         self.returnWidget = self._create_leg_widget(
             "回程",
             cfg.RunReturnBook,
             cfg.RunReturnHaggleNum,
+            self.returnStartLabel,
+            self.returnTargetLabel,
         )
         self.startComboBox.currentTextChanged.connect(self._set_start_city)
         self.targetComboBox.currentTextChanged.connect(self._set_target_city)
 
-        self.hBoxLayout.addWidget(self.startComboBox, 0, Qt.AlignmentFlag.AlignRight)
-        self.hBoxLayout.addWidget(self.outboundWidget, 0, Qt.AlignmentFlag.AlignRight)
-        self.hBoxLayout.addWidget(self.returnWidget, 0, Qt.AlignmentFlag.AlignRight)
-        self.hBoxLayout.addWidget(self.targetComboBox, 0, Qt.AlignmentFlag.AlignRight)
+        self.routeWidget = QWidget(self)
+        self.routeLayout = QVBoxLayout(self.routeWidget)
+        self.routeLayout.setContentsMargins(0, 6, 16, 6)
+        self.routeLayout.setSpacing(8)
+        self.routeLayout.addWidget(self.outboundWidget)
+        self.routeLayout.addWidget(self.returnWidget)
+        self.hBoxLayout.addWidget(self.routeWidget, 0, Qt.AlignmentFlag.AlignRight)
         self.hBoxLayout.addSpacing(16)
+        self.setFixedHeight(118)
         self.refreshPlanningControls()
 
-    def _create_leg_widget(self, label: str, book_config, haggle_config) -> QWidget:
+    def _create_city_label(self, text: str) -> QLabel:
+        label = QLabel(text, self)
+        label.setFixedWidth(132)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        return label
+
+    def _create_leg_widget(
+        self,
+        label: str,
+        book_config,
+        haggle_config,
+        start_widget: QWidget,
+        target_widget: QWidget,
+    ) -> QWidget:
         widget = QWidget(self)
         layout = QHBoxLayout(widget)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
+        layout.setSpacing(8)
         title = QLabel(label, widget)
-        bookLabel = QLabel("书", widget)
+        fromLabel = QLabel("从", widget)
+        toLabel = QLabel("到", widget)
+        bookLabel = QLabel("用书", widget)
         haggleLabel = QLabel("抬砍", widget)
-        autoBookLabel = QLabel("书自动规划", widget)
-        autoHaggleLabel = QLabel("抬砍自动规划", widget)
-        bookSpinBox = SpinBox(widget)
-        haggleSpinBox = SpinBox(widget)
-        bookSpinBox.setRange(0, 20)
-        haggleSpinBox.setRange(0, 20)
-        bookSpinBox.setFixedWidth(58)
-        haggleSpinBox.setFixedWidth(58)
-        bookSpinBox.setValue(book_config.value)
-        haggleSpinBox.setValue(haggle_config.value)
-        bookSpinBox.valueChanged.connect(
+        autoBookLabel = QLabel("自动规划用书", widget)
+        autoHaggleLabel = QLabel("自动规划抬砍", widget)
+        bookComboBox = self._create_value_combo(book_config.value)
+        haggleComboBox = self._create_value_combo(haggle_config.value)
+        title.setFixedWidth(38)
+        fromLabel.setFixedWidth(18)
+        toLabel.setFixedWidth(18)
+        autoBookLabel.setMinimumWidth(84)
+        autoHaggleLabel.setMinimumWidth(84)
+        bookComboBox.currentTextChanged.connect(
             lambda value, config=book_config, text=f"{label}进货书": self._set_leg_value(config, text, value)
         )
-        haggleSpinBox.valueChanged.connect(
+        haggleComboBox.currentTextChanged.connect(
             lambda value, config=haggle_config, text=f"{label}抬砍": self._set_leg_value(config, text, value)
         )
         layout.addWidget(title)
+        layout.addWidget(fromLabel)
+        layout.addWidget(start_widget)
+        layout.addWidget(toLabel)
+        layout.addWidget(target_widget)
+        layout.addSpacing(10)
         layout.addWidget(bookLabel)
-        layout.addWidget(bookSpinBox)
+        layout.addWidget(bookComboBox)
         layout.addWidget(autoBookLabel)
+        layout.addSpacing(8)
         layout.addWidget(haggleLabel)
-        layout.addWidget(haggleSpinBox)
+        layout.addWidget(haggleComboBox)
         layout.addWidget(autoHaggleLabel)
         widget.bookLabel = bookLabel
-        widget.bookSpinBox = bookSpinBox
+        widget.bookSpinBox = bookComboBox
         widget.autoBookLabel = autoBookLabel
         widget.haggleLabel = haggleLabel
-        widget.haggleSpinBox = haggleSpinBox
+        widget.haggleSpinBox = haggleComboBox
         widget.autoHaggleLabel = autoHaggleLabel
         return widget
 
-    def _set_leg_value(self, config, label: str, value: int):
+    def _create_value_combo(self, value: int) -> ComboBox:
+        combo_box = ComboBox(self)
+        combo_box.addItems([str(index) for index in range(21)])
+        combo_box.setCurrentText(str(int(value or 0)))
+        combo_box.setFixedWidth(76)
+        return combo_box
+
+    def _set_leg_value(self, config, label: str, value: int | str):
+        value = int(value or 0)
         qconfig.set(config, value)
-        emit_config_changed("跑商配置已保存", f"{label}：{value}")
+        emit_config_changed("自动跑商配置已保存", f"{label}：{value}")
 
     def _set_start_city(self, text: str):
         qconfig.set(cfg.tradePlannerManualStartCity, text)
-        emit_config_changed("跑商配置已保存", f"起始城市：{text}")
+        self._update_return_route_labels()
+        emit_config_changed("自动跑商配置已保存", f"起始城市：{text}")
 
     def _set_target_city(self, text: str):
         qconfig.set(cfg.tradePlannerManualTargetCity, text)
-        emit_config_changed("跑商配置已保存", f"目标城市：{text}")
+        self._update_return_route_labels()
+        emit_config_changed("自动跑商配置已保存", f"目标城市：{text}")
+
+    def _update_return_route_labels(self):
+        self.returnStartLabel.setText(self.targetComboBox.currentText())
+        self.returnTargetLabel.setText(self.startComboBox.currentText())
 
     def refreshPlanningControls(self):
         auto_book = bool(cfg.RunUsePlannerBook.value)
@@ -197,34 +362,165 @@ class FatigueResourceSettingCard(SettingCard):
         super().__init__(icon, title, content, parent)
         self.countConfig = count_config
         self.useAllConfig = use_all_config
+        self.maxCount = max_count
         self.useAllCheckBox = CheckBox("使用完", self)
-        self.countSpinBox = SpinBox(self)
-        self.countSpinBox.setRange(0, max_count)
-        self.countSpinBox.setFixedWidth(76)
-        self.countSpinBox.setValue(int(count_config.value or 0))
+        self.countLabel = QLabel("使用数量", self)
+        self.countLineEdit = LineEdit(self)
+        self.countLineEdit.setValidator(QIntValidator(0, max_count, self))
+        self.countLineEdit.setFixedWidth(96)
+        self.countLineEdit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        raw_count = self._raw_count(count_config.value or 0)
+        initial_count = self._bounded_count(raw_count)
+        self.countLineEdit.setText(str(initial_count))
+        if initial_count != raw_count:
+            qconfig.set(self.countConfig, initial_count)
         self.useAllCheckBox.setChecked(bool(use_all_config.value))
-        self.countSpinBox.setEnabled(not self.useAllCheckBox.isChecked())
+        self.countLineEdit.setEnabled(not self.useAllCheckBox.isChecked())
+        self.countLabel.setEnabled(not self.useAllCheckBox.isChecked())
         self.useAllCheckBox.toggled.connect(self._set_use_all)
-        self.countSpinBox.valueChanged.connect(self._set_count)
+        self.countLineEdit.editingFinished.connect(self._set_count)
+        signalBus.fatigueResourceCountChanged.connect(self._on_count_config_changed)
+        self.hBoxLayout.addWidget(self.countLabel, 0, Qt.AlignmentFlag.AlignRight)
+        self.hBoxLayout.addWidget(self.countLineEdit, 0, Qt.AlignmentFlag.AlignRight)
         self.hBoxLayout.addWidget(self.useAllCheckBox, 0, Qt.AlignmentFlag.AlignRight)
-        self.hBoxLayout.addWidget(self.countSpinBox, 0, Qt.AlignmentFlag.AlignRight)
         self.hBoxLayout.addSpacing(16)
 
     def _set_use_all(self, checked: bool):
         qconfig.set(self.useAllConfig, checked)
-        self.countSpinBox.setEnabled(not checked)
+        self.countLineEdit.setEnabled(not checked)
+        self.countLabel.setEnabled(not checked)
         emit_config_changed(
-            "跑商配置已保存",
+            "自动跑商配置已保存",
             f"{self.titleLabel.text()}：{'使用完' if checked else '按数量'}",
         )
 
-    def _set_count(self, value: int):
+    def _set_count(self):
+        value = self._bounded_count(self.countLineEdit.text() or 0)
+        self.countLineEdit.setText(str(value))
         qconfig.set(self.countConfig, value)
-        emit_config_changed("跑商配置已保存", f"{self.titleLabel.text()}：{value}")
+        emit_config_changed("自动跑商配置已保存", f"{self.titleLabel.text()}：{value}")
+
+    def _on_count_config_changed(self, config, value: int):
+        if config is not self.countConfig:
+            return
+        if self.countLineEdit.hasFocus():
+            return
+        self.countLineEdit.setText(str(self._bounded_count(value)))
+
+    def _bounded_count(self, value) -> int:
+        return min(self.maxCount, max(0, self._raw_count(value)))
+
+    @staticmethod
+    def _raw_count(value) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+
+class RoleResonanceSettingCard(SettingCard):
+    def __init__(
+        self,
+        configItem,
+        icon,
+        title: str,
+        content: str,
+        *,
+        roles: list[str],
+        parent=None,
+    ):
+        super().__init__(icon, title, content, parent)
+        self.configItem = configItem
+        self.roles = list(roles)
+        self.comboBoxes: dict[str, ComboBox] = {}
+        self.setFixedHeight(300)
+
+        self.scrollArea = QScrollArea(self)
+        self.scrollArea.setWidgetResizable(True)
+        self.scrollArea.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.scrollArea.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scrollArea.setFixedSize(430, 252)
+
+        self.innerWidget = QWidget(self.scrollArea)
+        self.innerLayout = QVBoxLayout(self.innerWidget)
+        self.innerLayout.setContentsMargins(0, 0, 8, 0)
+        self.innerLayout.setSpacing(6)
+
+        values = self._config_values()
+
+        for role in self.roles:
+            row = QWidget(self.innerWidget)
+            rowLayout = QHBoxLayout(row)
+            rowLayout.setContentsMargins(0, 0, 0, 0)
+            rowLayout.setSpacing(10)
+
+            label = QLabel(role, row)
+            label.setFixedWidth(180)
+
+            comboBox = ComboBox(row)
+            comboBox.addItems([ROLE_RESONANCE_LABELS[value] for value in ROLE_RESONANCE_VALUES])
+            comboBox.setFixedWidth(112)
+            comboBox.setCurrentIndex(
+                self._index_for_level(values.get(role, ROLE_RESONANCE_UNOWNED))
+            )
+            comboBox.currentIndexChanged.connect(lambda _index, role_name=role: self._set_role(role_name))
+            self.comboBoxes[role] = comboBox
+
+            rowLayout.addWidget(label)
+            rowLayout.addWidget(comboBox)
+            rowLayout.addStretch(1)
+            self.innerLayout.addWidget(row)
+
+        self.innerLayout.addStretch(1)
+        self.scrollArea.setWidget(self.innerWidget)
+        self.hBoxLayout.addWidget(self.scrollArea, 0, Qt.AlignmentFlag.AlignRight)
+        self.hBoxLayout.addSpacing(16)
+
+    def _config_values(self) -> dict[str, int]:
+        return {
+            str(role).strip(): _role_resonance_level(value)
+            for role, value in dict(qconfig.get(self.configItem) or {}).items()
+            if str(role).strip()
+        }
+
+    def _index_for_level(self, level) -> int:
+        level = _role_resonance_level(level)
+        try:
+            return ROLE_RESONANCE_VALUES.index(level)
+        except ValueError:
+            return 0
+
+    def _combo_level(self, comboBox: ComboBox) -> int:
+        index = comboBox.currentIndex()
+        if 0 <= index < len(ROLE_RESONANCE_VALUES):
+            return ROLE_RESONANCE_VALUES[index]
+        return ROLE_RESONANCE_UNOWNED
+
+    def _values(self) -> dict[str, int]:
+        return {
+            role: self._combo_level(comboBox)
+            for role, comboBox in self.comboBoxes.items()
+        }
+
+    def _set_role(self, role: str):
+        qconfig.set(self.configItem, self._values())
+        emit_config_changed(
+            "自动跑商配置已保存",
+            f"{role}：{ROLE_RESONANCE_LABELS.get(self._combo_level(self.comboBoxes[role]), '未拥有')}",
+        )
+
+    def refreshFromConfig(self):
+        values = self._config_values()
+        for role, comboBox in self.comboBoxes.items():
+            comboBox.blockSignals(True)
+            comboBox.setCurrentIndex(
+                self._index_for_level(values.get(role, ROLE_RESONANCE_UNOWNED))
+            )
+            comboBox.blockSignals(False)
 
 
 class TwoRunBusinessInterface(ScrollArea):
-    """跑商配置 interface"""
+    """自动跑商 interface"""
 
     def __init__(self, parent=None):
         super().__init__(parent=parent)
@@ -237,10 +533,11 @@ class TwoRunBusinessInterface(ScrollArea):
         self.plannedRouteOptions: list[tuple[object, dict]] = []
         self.selectedRouteIndex: int = -1
         self.pendingRunAfterPlan = False
+        self._syncingCityCheckboxes = False
         self.scrollWidget = QWidget(self)
         self.expandLayout = ExpandLayout(self.scrollWidget)
 
-        self.titleLabel = QLabel("跑商配置", self)
+        self.titleLabel = QLabel("自动跑商", self)
 
         self.__initWidget()
 
@@ -261,13 +558,19 @@ class TwoRunBusinessInterface(ScrollArea):
         self.connectSignalToSlot()
         self.refreshConfigCards()
         self._update_city_checkbox_state()
+        self.updateRunStatus(
+            {
+                "stage": "等待规划",
+                "detail": self._city_selection_status_detail(),
+            }
+        )
 
     def loadSamples(self):
         """load samples"""
         self.citySelectionModeCard = SettingCard(
             FIF.TAG,
             "城市选择方式",
-            "自动规划会在勾选城市中选择路线；手动选择只在两座城市之间往返",
+            "自动规划城市：空白正常参与，勾选一个城市必进路线，打叉排除城市",
             self.scrollWidget,
         )
         self.citySelectionModeComboBox = ComboBox(self.citySelectionModeCard)
@@ -282,12 +585,21 @@ class TwoRunBusinessInterface(ScrollArea):
         self.citySelectionModeCard.hBoxLayout.addSpacing(16)
 
         self.cityCheckboxGroup = CheckboxGroup(self.scrollWidget)
-        selected_cities = set(cfg.tradePlannerIncludeCities.value or CITYS)
+        forced_cities = set(cfg.tradePlannerIncludeCities.value or [])
+        forced_city = next(iter(forced_cities), "") if len(forced_cities) == 1 else ""
+        excluded_cities = set(cfg.tradePlannerExcludeCities.value or [])
         unavailable_cities = set(cfg.tradePlannerUnavailableCities.value or [])
-        for city in CITYS:
-            checkbox = self.cityCheckboxGroup.addCheckbox(city)
-            checkbox.setChecked(city in selected_cities and city not in unavailable_cities)
-            checkbox.toggled.connect(partial(self.check_checkbox, checkbox))
+        for city in PLANNER_CITYS:
+            checkbox = PlanningCityCheckBox(city, self.cityCheckboxGroup)
+            self.cityCheckboxGroup.checkboxGroup.append(checkbox)
+            self.cityCheckboxGroup.flowLayout.addWidget(checkbox)
+            if city in unavailable_cities or city in excluded_cities:
+                checkbox.setPlanningState(Qt.CheckState.PartiallyChecked)
+            elif city == forced_city:
+                checkbox.setPlanningState(Qt.CheckState.Checked)
+            else:
+                checkbox.setPlanningState(Qt.CheckState.Unchecked)
+            checkbox.stateChanged.connect(partial(self.check_checkbox, checkbox))
         self.manualRouteCard = ManualRouteSettingCard(self.scrollWidget)
 
         self.runStatusCard = SettingCard(
@@ -298,8 +610,22 @@ class TwoRunBusinessInterface(ScrollArea):
         )
         self.runStatusCard.setFixedHeight(150)
         self.runStatusCard.contentLabel.setWordWrap(True)
+        self.runStatusCard.contentLabel.setTextFormat(Qt.TextFormat.PlainText)
+        self.runStatusCard.titleLabel.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.runStatusCard.contentLabel.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.runStatusCard.vBoxLayout.setAlignment(self.runStatusCard.titleLabel, Qt.Alignment())
+        self.runStatusCard.vBoxLayout.setAlignment(self.runStatusCard.contentLabel, Qt.Alignment())
+        self.runStatusCard.vBoxLayout.setSpacing(4)
+        self.runStatusCard.hBoxLayout.takeAt(4)
+        self.runStatusCard.hBoxLayout.setStretchFactor(self.runStatusCard.vBoxLayout, 1)
         self.runStatusActionPanel = QWidget(self.runStatusCard)
-        self.runStatusActionPanel.setFixedWidth(360)
+        self.runStatusActionPanel.setFixedWidth(260)
         self.runStatusActionLayout = QVBoxLayout(self.runStatusActionPanel)
         self.runStatusActionLayout.setContentsMargins(0, 0, 0, 0)
         self.runStatusActionLayout.setSpacing(8)
@@ -352,7 +678,7 @@ class TwoRunBusinessInterface(ScrollArea):
         self.plannerGroup = ExpandSettingCard(
             FIF.EDIT,
             "规划参数",
-            "市场、货舱、声望和商品解锁",
+            "市场、货舱、声望、成员共振和商品解锁",
             parent=self.scrollWidget,
         )
         self.plannerMaxLotCard = SpinBoxSettingCard(
@@ -413,6 +739,7 @@ class TwoRunBusinessInterface(ScrollArea):
                 self.scrollWidget,
             )
             card.contentLabel.setWordWrap(True)
+            card.contentLabel.setTextFormat(Qt.TextFormat.PlainText)
             card.setFixedHeight(168)
             button = PushButton("选择", card)
             button.setFixedWidth(72)
@@ -439,6 +766,14 @@ class TwoRunBusinessInterface(ScrollArea):
             placeholder="武林源=20\n7号自由港=20",
             parent=self.plannerGroup,
         )
+        self.roleResonanceCard = RoleResonanceSettingCard(
+            cfg.tradePlannerRoleResonance,
+            FIF.DICTIONARY,
+            "乘员配置",
+            "为每个可配置乘员选择未拥有或实际共振0-5",
+            roles=PLANNER_ROLES,
+            parent=self.plannerGroup,
+        )
         self.productUnlockStatusCard = TextMappingSettingCard(
             cfg.tradePlannerProductUnlockStatus,
             FIF.DOCUMENT,
@@ -450,11 +785,34 @@ class TwoRunBusinessInterface(ScrollArea):
             placeholder="武林源/明前龙井\n7号自由港/货物名",
             parent=self.plannerGroup,
         )
+        self.unavailableCitiesCard = TextListSettingCard(
+            cfg.tradePlannerUnavailableCities,
+            FIF.GLOBE,
+            "未解锁城市",
+            "每行填写城市名；脚本启动时会打开地图复查",
+            placeholder="修格里城\n贡露城",
+            parent=self.plannerGroup,
+        )
+        self.resetPersonalParamsCard = SettingCard(
+            FIF.DELETE,
+            "重置参数",
+            "清空货舱、声望、乘员共振和商品解锁等个人参数",
+            self.plannerGroup,
+        )
+        self.resetPersonalParamsButton = PushButton("重置", self.resetPersonalParamsCard)
+        self.resetPersonalParamsButton.setFixedWidth(72)
+        self.resetPersonalParamsCard.hBoxLayout.addWidget(
+            self.resetPersonalParamsButton, 0, Qt.AlignmentFlag.AlignRight
+        )
+        self.resetPersonalParamsCard.hBoxLayout.addSpacing(16)
         self.plannerGroup.viewLayout.addWidget(self.plannerMaxLotCard)
         self.plannerGroup.viewLayout.addWidget(self.plannerMaxRestockCard)
         self.plannerGroup.viewLayout.addWidget(self.defaultPrestigeCard)
         self.plannerGroup.viewLayout.addWidget(self.prestigeByCityCard)
+        self.plannerGroup.viewLayout.addWidget(self.roleResonanceCard)
         self.plannerGroup.viewLayout.addWidget(self.productUnlockStatusCard)
+        self.plannerGroup.viewLayout.addWidget(self.unavailableCitiesCard)
+        self.plannerGroup.viewLayout.addWidget(self.resetPersonalParamsCard)
 
         self.fatigueGroup = ExpandSettingCard(
             FIF.EDIT,
@@ -503,7 +861,7 @@ class TwoRunBusinessInterface(ScrollArea):
         self.useHuashiCard = SwitchSettingCard(
             FIF.SYNC,
             "桦石",
-            "每天最多 8 次，每次恢复 150 疲劳，消耗会逐渐增加",
+            "每天最多 8 次，每次恢复 150 疲劳；使用时确认弹窗会显示本次桦石消耗",
             cfg.RunUseHuashi,
             self.fatigueGroup,
         )
@@ -512,7 +870,7 @@ class TwoRunBusinessInterface(ScrollArea):
             cfg.RunHuashiUseAll,
             FIF.PENCIL_INK,
             "桦石次数",
-            "每日上限 8 次",
+            "使用数量上限 8；最多恢复 1200 疲劳",
             max_count=8,
             parent=self.fatigueGroup,
         )
@@ -532,71 +890,20 @@ class TwoRunBusinessInterface(ScrollArea):
         self.fatigueGroup.viewLayout.addWidget(self.huashiCard)
         self.fatigueGroup.viewLayout.addWidget(self.allowDrinkCard)
 
-        self.bookGroup = ExpandSettingCard(
-            FIF.EDIT,
-            "进货书设置",
-            "所有城市共用",
-            parent=self.scrollWidget,
-        )
         self.usePlannerBookCard = SwitchSettingCard(
             FIF.SYNC,
-            "自动规划",
-            "按照最高综合参考利润推荐的书量执行",
+            "进货书自动规划",
+            "开启后由规划器推荐去程/回程用书；关闭后在手动双城中填写固定值",
             cfg.RunUsePlannerBook,
-            self.bookGroup,
-        )
-        self.outboundBookCard = SpinBoxSettingCard(
-            cfg.RunOutboundBook,
-            FIF.PENCIL_INK,
-            "去程固定进货书",
-            "关闭自动规划时，起始城市买入使用",
-            spin_box_max=20,
-            parent=self.bookGroup,
-        )
-        self.returnBookCard = SpinBoxSettingCard(
-            cfg.RunReturnBook,
-            FIF.PENCIL_INK,
-            "回程固定进货书",
-            "关闭自动规划时，目标城市买入使用",
-            spin_box_max=20,
-            parent=self.bookGroup,
-        )
-        self.bookGroup.viewLayout.addWidget(self.usePlannerBookCard)
-        self.bookGroup.viewLayout.addWidget(self.outboundBookCard)
-        self.bookGroup.viewLayout.addWidget(self.returnBookCard)
-
-        self.haggleGroup = ExpandSettingCard(
-            FIF.EDIT,
-            "议价设置",
-            "所有城市共用",
             parent=self.scrollWidget,
         )
         self.usePlannerHaggleCard = SwitchSettingCard(
             FIF.SYNC,
-            "自动规划",
-            "按综合参考利润决定是否抬砍；需要时按满 20% 执行",
+            "议价自动规划",
+            "开启后按综合参考利润决定是否抬砍；关闭后在手动双城中填写固定值",
             cfg.RunUsePlannerHaggle,
-            self.haggleGroup,
+            parent=self.scrollWidget,
         )
-        self.outboundHaggleCard = SpinBoxSettingCard(
-            cfg.RunOutboundHaggleNum,
-            FIF.PENCIL_INK,
-            "去程固定抬砍成功次数",
-            "关闭自动规划时，起始城市买入和目标城市卖出使用；达到 20% 后会自动停止",
-            spin_box_max=20,
-            parent=self.haggleGroup,
-        )
-        self.returnHaggleCard = SpinBoxSettingCard(
-            cfg.RunReturnHaggleNum,
-            FIF.PENCIL_INK,
-            "回程固定抬砍成功次数",
-            "关闭自动规划时，目标城市买入和起始城市卖出使用；达到 20% 后会自动停止",
-            spin_box_max=20,
-            parent=self.haggleGroup,
-        )
-        self.haggleGroup.viewLayout.addWidget(self.usePlannerHaggleCard)
-        self.haggleGroup.viewLayout.addWidget(self.outboundHaggleCard)
-        self.haggleGroup.viewLayout.addWidget(self.returnHaggleCard)
 
     def _account_config_mode(self) -> str:
         mode = account_config_mode()
@@ -611,7 +918,7 @@ class TwoRunBusinessInterface(ScrollArea):
             app.TradePlanner.AccountConfigMode = mode
         except Exception as exc:
             logger.debug(f"同步运行时账号配置读取模式失败: {exc}")
-        emit_config_changed("跑商配置已保存", f"账号配置读取：{text}")
+        emit_config_changed("自动跑商配置已保存", f"账号配置读取：{text}")
         if mode == "manual":
             self.updateRunStatus(
                 {
@@ -621,7 +928,10 @@ class TwoRunBusinessInterface(ScrollArea):
             )
         elif missing_account_config_reasons():
             self.updateRunStatus(
-                {"stage": "需要读取账号配置", "detail": "自动模式下需要先补齐货舱和主城声望"}
+                {
+                    "stage": "需要读取账号配置",
+                    "detail": "自动模式下需要先补齐：" + "；".join(missing_account_config_reasons()),
+                }
             )
 
     def _city_selection_mode(self) -> str:
@@ -637,9 +947,15 @@ class TwoRunBusinessInterface(ScrollArea):
             app.TradePlanner.CitySelectionMode = mode
         except Exception as exc:
             logger.debug(f"同步运行时城市选择方式失败: {exc}")
-        emit_config_changed("跑商配置已保存", f"城市选择方式：{text}")
+        emit_config_changed("自动跑商配置已保存", f"城市选择方式：{text}")
         self._update_city_checkbox_state()
         self._clear_planned_route()
+        self.updateRunStatus(
+            {
+                "stage": "城市选择方式已更新",
+                "detail": self._city_selection_status_detail(mode),
+            }
+        )
 
     def _mixed_currency_priority(self) -> str:
         priority = cfg.tradePlannerMixedCurrencyPriority.value or "total"
@@ -648,7 +964,7 @@ class TwoRunBusinessInterface(ScrollArea):
     def _set_mixed_currency_priority(self, text: str):
         priority = MIXED_CURRENCY_PRIORITY_VALUES.get(text, "total")
         qconfig.set(cfg.tradePlannerMixedCurrencyPriority, priority)
-        emit_config_changed("跑商配置已保存", f"武林源收益优先级：{text}")
+        emit_config_changed("自动跑商配置已保存", f"武林源收益优先级：{text}")
 
     def _candidate_mode(self) -> str:
         mode = cfg.tradePlannerCandidateMode.value or "best"
@@ -660,48 +976,134 @@ class TwoRunBusinessInterface(ScrollArea):
     def _set_candidate_mode(self, text: str):
         mode = CANDIDATE_MODE_VALUES.get(text, "best")
         qconfig.set(cfg.tradePlannerCandidateMode, mode)
-        emit_config_changed("跑商配置已保存", f"候选路线数量：{text}")
+        emit_config_changed("自动跑商配置已保存", f"候选路线数量：{text}")
         self._rebuildLayout()
 
     def _update_city_checkbox_state(self):
         manual = self._city_selection_mode() == "manual"
         unavailable_cities = set(cfg.tradePlannerUnavailableCities.value or [])
+        forced_cities = set(cfg.tradePlannerIncludeCities.value or [])
+        forced_city = next(iter(forced_cities), "") if len(forced_cities) == 1 else ""
+        excluded_cities = set(cfg.tradePlannerExcludeCities.value or [])
         checkboxes = self.cityCheckboxGroup.checkboxGroup
+        self._syncingCityCheckboxes = True
         for checkbox in checkboxes:
-            checkbox.setEnabled(not manual and checkbox.text() not in unavailable_cities)
-            if checkbox.text() in unavailable_cities:
-                checkbox.setChecked(False)
+            city = getattr(checkbox, "city_name", checkbox.text())
+            checkbox.blockSignals(True)
+            checkbox.setVisible(not manual and city not in unavailable_cities)
+            checkbox.setEnabled(not manual and city not in unavailable_cities)
+            if city in unavailable_cities or city in excluded_cities:
+                checkbox.setPlanningState(Qt.CheckState.PartiallyChecked)
+            elif city == forced_city:
+                checkbox.setPlanningState(Qt.CheckState.Checked)
+            else:
+                checkbox.setPlanningState(Qt.CheckState.Unchecked)
+            checkbox.blockSignals(False)
+        self._syncingCityCheckboxes = False
         self.cityCheckboxGroup.setVisible(not manual)
         self.manualRouteCard.setVisible(manual)
         if hasattr(self, "expandLayout"):
             self._rebuildLayout()
 
-    def check_checkbox(self, checkbox: CheckBox, checked: bool):
-        if self._city_selection_mode() == "manual":
-            checkbox.setChecked(False)
+    def _forced_auto_city(self) -> str:
+        forced_cities = set(cfg.tradePlannerIncludeCities.value or [])
+        return next(iter(forced_cities), "") if len(forced_cities) == 1 else ""
+
+    def _excluded_auto_cities(self) -> set[str]:
+        return {
+            str(city).strip()
+            for city in (cfg.tradePlannerExcludeCities.value or [])
+            if str(city).strip()
+        }
+
+    def _city_selection_status_detail(self, mode: str | None = None) -> str:
+        mode = mode or self._city_selection_mode()
+        if mode == "manual":
+            manual_cities = self._manual_route_cities()
+            if manual_cities:
+                start_city, target_city = manual_cities
+                return f"手动双城：{start_city} 往返 {target_city}"
+            return "手动双城：请选择两座不同城市"
+
+        forced_city = self._forced_auto_city()
+        excluded_count = len(self._excluded_auto_cities())
+        if forced_city:
+            return f"自动规划：{forced_city} 必进路线，已排除 {excluded_count} 个城市"
+        return (
+            f"自动规划：所有未打叉城市正常参与，已排除 {excluded_count} 个城市"
+            if excluded_count
+            else "自动规划：所有城市正常参与"
+        )
+
+    def check_checkbox(self, checkbox: CheckBox, checked: int):
+        if self._syncingCityCheckboxes:
             return
-        if checkbox.text() in set(cfg.tradePlannerUnavailableCities.value or []) and checked:
-            checkbox.setChecked(False)
+        if self._city_selection_mode() == "manual":
+            self._update_city_checkbox_state()
+            return
+        city = getattr(checkbox, "city_name", checkbox.text())
+        state = checkbox.checkState()
+        if city in set(cfg.tradePlannerUnavailableCities.value or []):
+            self._update_city_checkbox_state()
             InfoBar.warning(
                 title="",
-                content=f"{checkbox.text()} 当前记录为未开放城市，已从自动规划中排除",
+                content=f"{city} 当前记录为未开放城市，已从自动规划中排除",
                 orient=Qt.Orientation.Horizontal,
                 isClosable=False,
                 parent=self,
             )
             return
-        selected = [
-            item.text()
-            for item in self.cityCheckboxGroup.checkboxGroup
-            if item.isChecked()
-        ]
-        qconfig.set(cfg.tradePlannerIncludeCities, selected)
-        emit_config_changed("跑商配置已保存", f"自动规划城市：{len(selected)} 个")
+        if state == Qt.CheckState.Checked:
+            self._syncingCityCheckboxes = True
+            for item in self.cityCheckboxGroup.checkboxGroup:
+                if item is checkbox:
+                    continue
+                if item.checkState() == Qt.CheckState.Checked:
+                    item.blockSignals(True)
+                    item.setPlanningState(Qt.CheckState.Unchecked)
+                    item.blockSignals(False)
+            self._syncingCityCheckboxes = False
+            forced = [city]
+        else:
+            forced = [
+                item.city_name
+                for item in self.cityCheckboxGroup.checkboxGroup
+                if getattr(item, "city_name", "") != city
+                and item.checkState() == Qt.CheckState.Checked
+            ][:1]
+
+        excluded = sorted(
+            {
+                item.city_name
+                for item in self.cityCheckboxGroup.checkboxGroup
+                if item.checkState() == Qt.CheckState.PartiallyChecked
+                and item.city_name not in set(cfg.tradePlannerUnavailableCities.value or [])
+            }
+        )
+        checkbox.refreshText()
+        qconfig.set(cfg.tradePlannerIncludeCities, forced)
+        qconfig.set(cfg.tradePlannerExcludeCities, excluded)
+        try:
+            from core.model import app
+
+            app.TradePlanner.IncludeCities = forced
+            app.TradePlanner.ExcludeCities = excluded
+        except Exception as exc:
+            logger.debug(f"同步运行时自动规划城市状态失败: {exc}")
+        self._clear_planned_route()
+        self.updateRunStatus(
+            {
+                "stage": "自动规划城市已更新",
+                "detail": self._city_selection_status_detail("auto"),
+            }
+        )
+        emit_config_changed(
+            "自动跑商配置已保存",
+            f"指定城市：{forced[0] if forced else '无'}；排除城市：{len(excluded)} 个",
+        )
 
     def __initLayout(self):
         self.fatigueGroup._adjustViewSize()
-        self.bookGroup._adjustViewSize()
-        self.haggleGroup._adjustViewSize()
         self.plannerGroup._adjustViewSize()
 
         self.expandLayout.setContentsMargins(36, 0, 36, 0)
@@ -717,6 +1119,8 @@ class TwoRunBusinessInterface(ScrollArea):
                 self.citySelectionModeCard,
                 self.cityCheckboxGroup,
                 self.manualRouteCard,
+                self.usePlannerBookCard,
+                self.usePlannerHaggleCard,
                 self.mixedCurrencyPriorityCard,
                 self.candidateModeCard,
             ]
@@ -727,16 +1131,16 @@ class TwoRunBusinessInterface(ScrollArea):
                 self.citySelectionModeCard,
                 self.cityCheckboxGroup,
                 self.manualRouteCard,
+                self.usePlannerBookCard,
+                self.usePlannerHaggleCard,
                 self.mixedCurrencyPriorityCard,
                 self.candidateModeCard,
                 *self.routeCandidateCards,
             ]
         return [
             *top_widgets,
-            self.plannerGroup,
             self.fatigueGroup,
-            self.bookGroup,
-            self.haggleGroup,
+            self.plannerGroup,
         ]
 
     def _rebuildLayout(self):
@@ -783,12 +1187,13 @@ class TwoRunBusinessInterface(ScrollArea):
             self._set_candidate_mode
         )
         self.planBusinessCard.clicked.connect(self.planBusiness)
+        self.resetPersonalParamsButton.clicked.connect(self.confirmResetPersonalParams)
         self.runActionButton.clicked.connect(self.runPlannedBusiness)
         self.stopRunButton.clicked.connect(self.stopRunning)
         self.usePlannerBookCard.checkedChanged.connect(
             lambda checked: (
                 emit_config_changed(
-                    "跑商配置已保存",
+                    "自动跑商配置已保存",
                     f"进货书自动规划：{'开启' if checked else '关闭'}",
                 ),
                 self.manualRouteCard.refreshPlanningControls(),
@@ -798,7 +1203,7 @@ class TwoRunBusinessInterface(ScrollArea):
         self.usePlannerHaggleCard.checkedChanged.connect(
             lambda checked: (
                 emit_config_changed(
-                    "跑商配置已保存",
+                    "自动跑商配置已保存",
                     f"议价自动规划：{'开启' if checked else '关闭'}",
                 ),
                 self.manualRouteCard.refreshPlanningControls(),
@@ -808,7 +1213,7 @@ class TwoRunBusinessInterface(ScrollArea):
         self.useStrengthMedicineCard.checkedChanged.connect(
             lambda checked: (
                 emit_config_changed(
-                    "跑商配置已保存",
+                    "自动跑商配置已保存",
                     f"使用体力药：{'开启' if checked else '关闭'}",
                 ),
                 self.refreshFatigueCards(),
@@ -817,7 +1222,7 @@ class TwoRunBusinessInterface(ScrollArea):
         self.useHuashiCard.checkedChanged.connect(
             lambda checked: (
                 emit_config_changed(
-                    "跑商配置已保存",
+                    "自动跑商配置已保存",
                     f"桦石恢复：{'开启' if checked else '关闭'}",
                 ),
                 self.refreshFatigueCards(),
@@ -825,18 +1230,89 @@ class TwoRunBusinessInterface(ScrollArea):
         )
         self.allowFoodCard.checkedChanged.connect(
             lambda checked: emit_config_changed(
-                "跑商配置已保存",
+                "自动跑商配置已保存",
                 f"便当柜：{'允许' if checked else '不使用'}",
             )
         )
         self.allowDrinkCard.checkedChanged.connect(
             lambda checked: emit_config_changed(
-                "跑商配置已保存",
+                "自动跑商配置已保存",
                 f"喝酒：{'允许' if checked else '不使用'}",
             )
         )
         signalBus.configChanged.connect(self.onConfigChanged)
         signalBus.runStatusChanged.connect(self.updateRunStatus)
+
+    def confirmResetPersonalParams(self):
+        w = MessageBox(
+            "重置个人参数",
+            "将清空货舱数量、城市声望、乘员共振、商品解锁状态和未开放城市记录。\n\n"
+            "重置后需要重新读取账号配置或手动填写这些参数。",
+            self,
+        )
+        w.yesButton.setText("确定")
+        w.cancelButton.setText("取消")
+        if w.exec():
+            self.resetPersonalParams()
+
+    def resetPersonalParams(self):
+        qconfig.set(cfg.tradePlannerAccountProfileReady, False)
+        qconfig.set(cfg.tradePlannerCitySelectionMode, cfg.tradePlannerCitySelectionMode.defaultValue)
+        qconfig.set(cfg.tradePlannerIncludeCities, [])
+        qconfig.set(cfg.tradePlannerExcludeCities, [])
+        qconfig.set(cfg.tradePlannerMaxLot, cfg.tradePlannerMaxLot.defaultValue)
+        qconfig.set(cfg.tradePlannerDefaultPrestigeLevel, cfg.tradePlannerDefaultPrestigeLevel.defaultValue)
+        qconfig.set(cfg.tradePlannerPrestigeByCity, {})
+        qconfig.set(cfg.tradePlannerRoleResonance, {})
+        qconfig.set(cfg.tradePlannerProductUnlockStatus, {})
+        qconfig.set(cfg.tradePlannerProductUnlockStatusByCity, {})
+        qconfig.set(cfg.tradePlannerUnavailableCities, [])
+
+        try:
+            from core.model import app
+
+            app.TradePlanner.AccountProfileReady = False
+            app.TradePlanner.CitySelectionMode = cfg.tradePlannerCitySelectionMode.value
+            app.TradePlanner.IncludeCities = []
+            app.TradePlanner.ExcludeCities = []
+            app.TradePlanner.MaxLot = cfg.tradePlannerMaxLot.value
+            app.TradePlanner.DefaultPrestigeLevel = cfg.tradePlannerDefaultPrestigeLevel.value
+            app.TradePlanner.PrestigeByCity = {}
+            app.TradePlanner.RoleResonance = {}
+            app.TradePlanner.ProductUnlockStatus = {}
+            app.TradePlanner.ProductUnlockStatusByCity = {}
+            app.TradePlanner.UnavailableCities = []
+        except Exception as exc:
+            logger.debug(f"同步运行时个人参数重置失败: {exc}")
+
+        self.plannerMaxLotCard.spinBox.blockSignals(True)
+        self.plannerMaxLotCard.spinBox.setValue(cfg.tradePlannerMaxLot.value)
+        self.plannerMaxLotCard.spinBox.blockSignals(False)
+        self.defaultPrestigeCard.spinBox.blockSignals(True)
+        self.defaultPrestigeCard.spinBox.setValue(cfg.tradePlannerDefaultPrestigeLevel.value)
+        self.defaultPrestigeCard.spinBox.blockSignals(False)
+        self.prestigeByCityCard.textEdit.setPlainText("")
+        self.roleResonanceCard.refreshFromConfig()
+        self.productUnlockStatusCard.textEdit.setPlainText("")
+        self.unavailableCitiesCard.textEdit.setPlainText("")
+        self.citySelectionModeComboBox.blockSignals(True)
+        self.citySelectionModeComboBox.setCurrentText(
+            CITY_SELECTION_MODE_LABELS[self._city_selection_mode()]
+        )
+        self.citySelectionModeComboBox.blockSignals(False)
+        self._clear_planned_route()
+        self._update_city_checkbox_state()
+        self.updateRunStatus(
+            {"stage": "个人参数已重置", "detail": "请重新读取账号配置，城市开放状态也会重新确认"}
+        )
+        emit_config_changed("个人参数已重置", "城市选择、货舱、声望、乘员共振、商品解锁和未开放城市记录已重置")
+        InfoBar.success(
+            title="",
+            content="个人参数已重置。",
+            orient=Qt.Orientation.Horizontal,
+            isClosable=False,
+            parent=self,
+        )
 
     def updateRunStatus(self, status: dict):
         stage = str(status.get("stage") or "运行中")
@@ -853,13 +1329,17 @@ class TwoRunBusinessInterface(ScrollArea):
             parts.append(route_summary)
         elif route:
             parts.append(f"路线：{route}")
+            if detail:
+                parts.append(detail)
+                detail = ""
         if target_city:
             parts.append(f"目标：{target_city}")
         elif current_city:
             parts.append(f"城市：{current_city}")
         if detail:
             parts.append(detail)
-        self.runStatusCard.contentLabel.setText("  |  ".join(parts) or "等待开始")
+        separator = "\n" if any("\n" in part for part in parts) else "  |  "
+        self.runStatusCard.contentLabel.setText(separator.join(parts) or "等待开始")
         if not profit_text:
             self.runStatusProfitLabel.clear()
             self.runStatusProfitLabel.hide()
@@ -890,22 +1370,22 @@ class TwoRunBusinessInterface(ScrollArea):
         if hasattr(self, "manualRouteCard"):
             self.manualRouteCard.refreshPlanningControls()
         self.refreshFatigueCards()
-        if hasattr(self, "outboundBookCard"):
-            auto_book = bool(cfg.RunUsePlannerBook.value)
-            self.outboundBookCard.setVisible(not auto_book)
-            self.returnBookCard.setVisible(not auto_book)
-        if hasattr(self, "outboundHaggleCard"):
-            auto_haggle = bool(cfg.RunUsePlannerHaggle.value)
-            self.outboundHaggleCard.setVisible(not auto_haggle)
-            self.returnHaggleCard.setVisible(not auto_haggle)
         if hasattr(self, "prestigeByCityCard") and not self.prestigeByCityCard.textEdit.hasFocus():
             self.prestigeByCityCard.textEdit.setPlainText(
                 self.prestigeByCityCard._format(cfg.tradePlannerPrestigeByCity.value or {})
             )
+        if hasattr(self, "roleResonanceCard"):
+            self.roleResonanceCard.refreshFromConfig()
         if hasattr(self, "productUnlockStatusCard") and not self.productUnlockStatusCard.textEdit.hasFocus():
             self.productUnlockStatusCard.textEdit.setPlainText(
                 self.productUnlockStatusCard._format(
                     cfg.tradePlannerProductUnlockStatus.value or {}
+                )
+            )
+        if hasattr(self, "unavailableCitiesCard") and not self.unavailableCitiesCard.textEdit.hasFocus():
+            self.unavailableCitiesCard.textEdit.setPlainText(
+                self.unavailableCitiesCard._format(
+                    cfg.tradePlannerUnavailableCities.value or []
                 )
             )
 
@@ -916,16 +1396,16 @@ class TwoRunBusinessInterface(ScrollArea):
         for card in (self.lollipopCard, self.gumCard, self.cactusCandyCard):
             card.setVisible(use_medicine)
         self.huashiCard.setVisible(bool(cfg.RunUseHuashi.value))
+        self.fatigueGroup.viewLayout.invalidate()
+        self.fatigueGroup._adjustViewSize()
+        if hasattr(self, "expandLayout"):
+            self._rebuildLayout()
 
     def _selected_cities(self) -> set[str] | None:
         if self._city_selection_mode() == "manual":
             return None
-        cities = {
-            checkbox.text()
-            for checkbox in self.cityCheckboxGroup.checkboxGroup
-            if checkbox.isChecked()
-        }
-        return cities or None
+        forced_city = self._forced_auto_city()
+        return {forced_city} if forced_city else None
 
     def _manual_route_cities(self) -> tuple[str, str] | None:
         start = str(cfg.tradePlannerManualStartCity.value or "").strip()
@@ -962,6 +1442,11 @@ class TwoRunBusinessInterface(ScrollArea):
             ),
             "default_prestige_level": cfg.tradePlannerDefaultPrestigeLevel.value,
             "prestige_by_city": dict(cfg.tradePlannerPrestigeByCity.value or {}),
+            "roles": {
+                str(role): {"resonance": _role_resonance_level(level)}
+                for role, level in dict(cfg.tradePlannerRoleResonance.value or {}).items()
+            },
+            "use_default_roles": True,
             "product_unlock_status": product_unlock_status,
             "product_unlock_status_by_city": product_unlock_status_by_city,
             "use_default_product_unlock_status": False,
@@ -972,8 +1457,6 @@ class TwoRunBusinessInterface(ScrollArea):
             for city in (cfg.tradePlannerUnavailableCities.value or [])
             if str(city).strip()
         }
-        if unavailable_cities:
-            kwargs["exclude_cities"] = unavailable_cities
 
         if self._city_selection_mode() == "manual":
             manual_cities = self._manual_route_cities()
@@ -1000,6 +1483,9 @@ class TwoRunBusinessInterface(ScrollArea):
                     target_city: int(cfg.RunReturnHaggleNum.value or 0),
                 }
         else:
+            excluded_cities = unavailable_cities | self._excluded_auto_cities()
+            if excluded_cities:
+                kwargs["exclude_cities"] = excluded_cities
             selected_cities = self._selected_cities()
             if selected_cities:
                 kwargs["include_cities"] = selected_cities
@@ -1021,6 +1507,16 @@ class TwoRunBusinessInterface(ScrollArea):
         if not legs:
             return "没有路线明细"
         return "\n".join(self._summary_leg_text(leg) for leg in legs)
+
+    def _summary_status_text(self, summary: dict | None) -> str:
+        if not summary:
+            return ""
+        lines = [f"路线：{self._summary_route_text(summary)}"]
+        lines.extend(
+            self._summary_leg_text(leg)
+            for leg in (summary.get("legs") or [])[:2]
+        )
+        return "\n".join(line for line in lines if line)
 
     def _summary_profit_text(self, summary: dict | None) -> str:
         if not summary:
@@ -1120,9 +1616,12 @@ class TwoRunBusinessInterface(ScrollArea):
         from auto.run_business.status_fields import summary_profit_status_fields
 
         status = {
-            "stage": f"已选择候选路线 {index + 1}",
-            "detail": self._summary_leg_detail_text(self.plannedSummary),
-            "route": self._summary_route_text(self.plannedSummary),
+            "stage": (
+                "已选择最优候选路线"
+                if self._candidate_mode() == "best"
+                else f"已选择候选路线 {index + 1}"
+            ),
+            "route_summary": self._summary_status_text(self.plannedSummary),
         }
         status.update(summary_profit_status_fields(self.plannedSummary))
         self.updateRunStatus(status)
@@ -1143,7 +1642,7 @@ class TwoRunBusinessInterface(ScrollArea):
         self.updateRunStatus({"stage": "需要读取账号配置", "detail": detail})
         w = MessageBox(
             "需要读取账号配置",
-            "当前为账号配置自动读取模式，但货舱或主城声望配置不完整。\n\n"
+            "当前为账号配置自动读取模式，但货舱、主城声望、乘员共振或城市开放状态配置不完整。\n\n"
             f"{detail}\n\n"
             "请先读取账号配置后再规划或执行跑商。",
             self,
@@ -1196,6 +1695,7 @@ class TwoRunBusinessInterface(ScrollArea):
 
     def analyzeAccountProfile(self):
         from auto.run_business.account_profile import analyze_account_profile
+        from core.control.control import stop as stop_control
 
         if not account_config_auto_enabled():
             self.updateRunStatus(
@@ -1215,14 +1715,70 @@ class TwoRunBusinessInterface(ScrollArea):
         if self.accountProfileWorker and self.accountProfileWorker.isRunning():
             self.updateRunStatus({"stage": "正在读取账号配置", "detail": "账号配置读取已经在运行中"})
             return
-        self.updateRunStatus({"stage": "正在读取账号配置", "detail": "正在读取货舱和城市声望"})
+        read_options, read_parts = self._account_profile_read_options()
+        if not read_parts:
+            self.updateRunStatus({"stage": "账号配置已完整", "detail": "没有需要自动读取的缺失项"})
+            InfoBar.success(
+                title="",
+                content="账号配置已完整，没有需要自动读取的缺失项。",
+                orient=Qt.Orientation.Horizontal,
+                isClosable=False,
+                parent=self,
+            )
+            return
+        self.updateRunStatus(
+            {
+                "stage": "正在读取账号配置",
+                "detail": "正在读取" + "、".join(read_parts),
+            }
+        )
         self.accountConfigModeComboBox.setEnabled(False)
-        self.accountProfileWorker = Worker(analyze_account_profile, lambda: None)
+        self.runActionButton.setEnabled(False)
+        self.stopRunButton.setEnabled(True)
+        self.stopRunButton.setText("停止")
+        self.accountProfileWorker = Worker(
+            analyze_account_profile,
+            stop_control,
+            **read_options,
+        )
         self.accountProfileWorker.result.connect(self.on_account_profile_result)
         self.accountProfileWorker.finished.connect(
             lambda: self.on_account_profile_finished(self.accountProfileWorker)
         )
         self.accountProfileWorker.start()
+
+    def _account_profile_read_options(self) -> tuple[dict, list[str]]:
+        missing_cities = missing_prestige_cities()
+        read_cargo = int(cfg.tradePlannerMaxLot.value or 0) <= 0
+        read_prestige = bool(missing_cities)
+        missing_roles = missing_role_resonance_names()
+        incremental_roles = newly_added_missing_role_resonance_names()
+        read_role_resonance = bool(missing_roles)
+        read_unavailable_cities = missing_unavailable_cities_config()
+
+        parts: list[str] = []
+        if read_cargo:
+            parts.append("货舱上限")
+        if read_prestige:
+            parts.append("城市声望")
+        if read_role_resonance:
+            parts.append("乘员共振")
+        if read_unavailable_cities:
+            parts.append("城市开放状态")
+
+        return (
+            {
+                "read_cargo": read_cargo,
+                "read_prestige": read_prestige,
+                "read_role_resonance": read_role_resonance,
+                "role_resonance_roles": missing_roles,
+                "role_resonance_incremental": bool(incremental_roles),
+                "role_resonance_known_roles": configured_role_resonance_names(),
+                "read_unavailable_cities_flag": read_unavailable_cities,
+                "prestige_cities": missing_cities,
+            },
+            parts,
+        )
 
     def focusAndAnalyzeAccountProfile(self):
         self.updateRunStatus({"stage": "准备读取账号配置", "detail": "正在定位账号配置读取选项"})
@@ -1251,6 +1807,7 @@ class TwoRunBusinessInterface(ScrollArea):
         updates = update_trade_account_profile(
             cargo_capacity=result.cargo_capacity,
             prestige_by_city=result.prestige_by_city,
+            role_resonance=result.role_resonance,
             unavailable_cities=result.unavailable_cities,
             reason="界面读取账号配置",
         )
@@ -1258,6 +1815,10 @@ class TwoRunBusinessInterface(ScrollArea):
             self.plannerMaxLotCard.spinBox.setValue(cfg.tradePlannerMaxLot.value)
         self.prestigeByCityCard.textEdit.setPlainText(
             self.prestigeByCityCard._format(cfg.tradePlannerPrestigeByCity.value or {})
+        )
+        self.roleResonanceCard.refreshFromConfig()
+        self.unavailableCitiesCard.textEdit.setPlainText(
+            self.unavailableCitiesCard._format(cfg.tradePlannerUnavailableCities.value or [])
         )
         self._clear_planned_route()
         self._update_city_checkbox_state()
@@ -1273,6 +1834,9 @@ class TwoRunBusinessInterface(ScrollArea):
 
     def on_account_profile_finished(self, worker: Optional[Worker]):
         self.accountConfigModeComboBox.setEnabled(True)
+        self.runActionButton.setEnabled(True)
+        self.stopRunButton.setEnabled(False)
+        self.stopRunButton.setText("停止")
         if worker:
             worker.deleteLater()
         self.accountProfileWorker = None
@@ -1309,6 +1873,16 @@ class TwoRunBusinessInterface(ScrollArea):
             self.runActionButton.setEnabled(True)
             self.runActionButton.setText("执行")
             self.stopRunButton.setEnabled(False)
+            if self._candidate_count() <= 1:
+                InfoBar.success(
+                    title="",
+                    content="已完成规划，正在执行最优路线",
+                    orient=Qt.Orientation.Horizontal,
+                    isClosable=False,
+                    parent=self,
+                )
+                QTimer.singleShot(0, self._start_planned_route_run)
+                return
             content = (
                 "已完成规划，请选择路线后点击执行"
                 if self._candidate_count() > 1
@@ -1431,7 +2005,7 @@ class TwoRunBusinessInterface(ScrollArea):
         self.plannedRunWorker = None
 
     def _active_run_worker(self) -> Optional[Worker]:
-        for worker in (self.plannedRunWorker,):
+        for worker in (self.plannedRunWorker, self.accountProfileWorker):
             if worker and worker.isRunning():
                 return worker
         return None
@@ -1456,7 +2030,7 @@ class TwoRunBusinessInterface(ScrollArea):
             return
         InfoBar.warning(
             title="",
-            content="当前没有正在运行的跑商任务",
+            content="当前没有正在运行的任务",
             orient=Qt.Orientation.Horizontal,
             isClosable=False,
             parent=self,

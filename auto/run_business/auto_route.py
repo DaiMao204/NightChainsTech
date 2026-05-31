@@ -6,9 +6,12 @@ from typing import Any
 from loguru import logger
 
 from app.common.account_config import account_config_auto_enabled
+from app.common.config import cfg
 from app.common.runtime_status import emit_run_status
 import core.control.control as control_state
+from auto.run_business.config_updates import TradeRouteReplanRequired, update_trade_account_profile
 from auto.run_business.main import run
+from auto.module.strength import reset_strength_runtime_state
 from auto.run_business.planner import (
     DEFAULT_MARKET_CACHE_TTL,
     MarketData,
@@ -26,6 +29,10 @@ from auto.run_business.status_fields import summary_profit_status_fields
 from auto.run_business.planner_config import load_trade_planner_config, route_plan_options_from_config
 from core.model import app
 from core.model.city_goods import RoutesModel
+from core.preset import go_home
+
+
+MAX_RUNTIME_REPLAN_ATTEMPTS = 3
 
 
 def _city_set(values: list[str] | tuple[str, ...] | set[str] | None) -> set[str] | None:
@@ -66,6 +73,24 @@ def _split_product_unlock_status(
     return global_status, city_status
 
 
+def _merge_product_unlock_status_by_city(
+    base: dict[str, dict[str, bool]] | None,
+    updates: dict[str, dict[str, bool]] | None,
+) -> dict[str, dict[str, bool]]:
+    merged: dict[str, dict[str, bool]] = {
+        str(city): {str(good): _bool_value(unlocked) for good, unlocked in goods.items()}
+        for city, goods in (base or {}).items()
+        if isinstance(goods, dict)
+    }
+    for city, goods in (updates or {}).items():
+        if not isinstance(goods, dict):
+            continue
+        city_status = dict(merged.get(str(city)) or {})
+        city_status.update({str(good): _bool_value(unlocked) for good, unlocked in goods.items()})
+        merged[str(city)] = city_status
+    return merged
+
+
 def _role_resonance(values: dict[str, object] | None) -> dict[str, dict[str, int]]:
     roles: dict[str, dict[str, int]] = {}
     for role_name, value in (values or {}).items():
@@ -73,8 +98,75 @@ def _role_resonance(values: dict[str, object] | None) -> dict[str, dict[str, int
             resonance = int(value.get("resonance") or 0)
         else:
             resonance = int(value or 0)
+        if resonance <= 0:
+            resonance = 0
+        elif resonance < 4:
+            resonance = 1
+        elif resonance > 5:
+            resonance = 5
         roles[role_name] = {"resonance": resonance}
     return roles
+
+
+def _configured_unavailable_cities() -> set[str]:
+    return {
+        str(city).strip()
+        for city in (cfg.tradePlannerUnavailableCities.value or [])
+        if str(city).strip()
+    }
+
+
+def refresh_unavailable_cities_before_planning(
+    exclude_cities: set[str] | None,
+) -> set[str] | None:
+    """Refresh account-derived locked cities before route planning."""
+    if not account_config_auto_enabled():
+        return exclude_cities
+
+    old_unavailable = _configured_unavailable_cities()
+    if not old_unavailable:
+        return exclude_cities
+
+    emit_run_status(
+        "正在检查未解锁城市",
+        f"正在复查 {len(old_unavailable)} 个账号配置未解锁城市",
+    )
+    if not control_state.connect():
+        logger.warning("检查未解锁城市前连接游戏失败，沿用现有未解锁城市配置")
+        return exclude_cities
+
+    try:
+        from auto.run_business.account_profile import read_unavailable_map_cities
+
+        still_unavailable = read_unavailable_map_cities(sorted(old_unavailable))
+    except Exception as exc:
+        logger.exception(f"启动脚本检查未解锁城市失败: {exc}")
+        emit_run_status("未解锁城市检查失败", "沿用现有未解锁城市配置")
+        return exclude_cities
+
+    if still_unavailable is None:
+        logger.warning("检查未解锁城市未得到结果，沿用现有未解锁城市配置")
+        return exclude_cities
+
+    still_unavailable_set = {
+        str(city).strip() for city in still_unavailable if str(city).strip()
+    }
+    unlocked_cities = sorted(old_unavailable - still_unavailable_set)
+    update_trade_account_profile(
+        unavailable_cities=sorted(still_unavailable_set),
+        reason="启动脚本检查城市开放状态",
+    )
+    if unlocked_cities:
+        emit_run_status(
+            "未解锁城市已更新",
+            "已解锁：" + "、".join(unlocked_cities),
+        )
+
+    if exclude_cities is None:
+        return None
+
+    user_excluded = _city_set(getattr(app.TradePlanner, "ExcludeCities", [])) or set()
+    return (set(exclude_cities) - old_unavailable) | still_unavailable_set | user_excluded
 
 
 @dataclass
@@ -117,6 +209,9 @@ def app_route_plan_options(
     blocked_goods: set[str] | None = None,
     default_prestige_level: int | None = None,
     prestige_by_city: dict[str, int] | None = None,
+    roles: dict[str, dict[str, int]] | None = None,
+    use_default_roles: bool | None = None,
+    disabled_roles: set[str] | None = None,
     product_unlock_status: dict[str, bool] | None = None,
     product_unlock_status_by_city: dict[str, dict[str, bool]] | None = None,
     use_default_product_unlock_status: bool | None = None,
@@ -140,7 +235,7 @@ def app_route_plan_options(
         }
     else:
         city_books = {} if use_planner_book else {city: global_book for city in cities}
-    config_max_restock = int(getattr(trade_planner, "MaxRestock", 4) or 4)
+    config_max_restock = int(getattr(trade_planner, "MaxRestock", 6) or 6)
     config_max_lot = int(getattr(trade_planner, "MaxLot", 1136) or 1136)
     if max_restock is not None:
         resolved_max_restock = max_restock
@@ -169,6 +264,10 @@ def app_route_plan_options(
             if isinstance(goods, dict)
         }
     )
+    configured_exclude_cities = (
+        (_city_set(getattr(trade_planner, "ExcludeCities", [])) or set())
+        | _configured_unavailable_cities()
+    )
     options = RoutePlanOptions(
         strategy=strategy,
         mixed_currency_priority=normalize_mixed_currency_priority(
@@ -181,7 +280,7 @@ def app_route_plan_options(
         haggle_by_city=city_haggles,
         auto_haggle=use_planner_haggle,
         include_cities=_city_set(getattr(trade_planner, "IncludeCities", [])),
-        exclude_cities=_city_set(getattr(trade_planner, "ExcludeCities", [])),
+        exclude_cities=configured_exclude_cities or None,
         directed_city_pairs=None,
         allowed_city_pairs=normalize_city_pairs(getattr(trade_planner, "AllowedCityPairs", [])),
         blocked_city_pairs=normalize_city_pairs(getattr(trade_planner, "BlockedCityPairs", [])),
@@ -195,13 +294,12 @@ def app_route_plan_options(
         compare_no_return_bargain=bool(getattr(trade_planner, "CompareNoReturnBargain", True)),
         default_prestige_level=int(getattr(trade_planner, "DefaultPrestigeLevel", 20) or 20),
         prestige_by_city=dict(getattr(trade_planner, "PrestigeByCity", {}) or {}),
-        roles=_role_resonance(getattr(trade_planner, "RoleResonance", {})),
-        disabled_roles=_city_set(getattr(trade_planner, "DisabledRoles", [])),
+        roles=_role_resonance(roles if roles is not None else getattr(trade_planner, "RoleResonance", {})),
+        use_default_roles=bool(use_default_roles) if use_default_roles is not None else True,
+        disabled_roles=disabled_roles if disabled_roles is not None else None,
         product_unlock_status=configured_unlock_status,
         product_unlock_status_by_city=configured_unlock_status_by_city,
-        use_default_product_unlock_status=bool(
-            getattr(trade_planner, "UseDefaultProductUnlockStatus", False)
-        ),
+        use_default_product_unlock_status=False,
         events=dict(getattr(trade_planner, "Events", {}) or {}),
     )
     config_path = planner_config or getattr(trade_planner, "ConfigPath", "") or None
@@ -246,16 +344,28 @@ def app_route_plan_options(
         overrides["prestige_by_city"] = {
             str(city): int(level) for city, level in prestige_by_city.items()
         }
+    if roles is not None:
+        overrides["roles"] = _role_resonance(roles)
+    if use_default_roles is not None:
+        overrides["use_default_roles"] = bool(use_default_roles)
+    if disabled_roles is not None:
+        overrides["disabled_roles"] = {str(role) for role in disabled_roles if str(role).strip()}
     if product_unlock_status is not None:
         unlock_status, unlock_status_by_city = _split_product_unlock_status(product_unlock_status)
         overrides["product_unlock_status"] = unlock_status
         if unlock_status_by_city:
-            overrides["product_unlock_status_by_city"] = unlock_status_by_city
+            overrides["product_unlock_status_by_city"] = _merge_product_unlock_status_by_city(
+                options.product_unlock_status_by_city,
+                unlock_status_by_city,
+            )
     if product_unlock_status_by_city is not None:
-        overrides["product_unlock_status_by_city"] = {
-            str(city): {str(good): _bool_value(unlocked) for good, unlocked in goods.items()}
-            for city, goods in product_unlock_status_by_city.items()
-        }
+        merged_status = _merge_product_unlock_status_by_city(
+            overrides.get("product_unlock_status_by_city")
+            or options.product_unlock_status_by_city,
+            product_unlock_status_by_city,
+        )
+        if merged_status:
+            overrides["product_unlock_status_by_city"] = merged_status
     if use_default_product_unlock_status is not None:
         overrides["use_default_product_unlock_status"] = bool(use_default_product_unlock_status)
     return replace(options, **overrides) if overrides else options
@@ -306,6 +416,9 @@ def select_planned_routes(
     blocked_goods: set[str] | None = None,
     default_prestige_level: int | None = None,
     prestige_by_city: dict[str, int] | None = None,
+    roles: dict[str, dict[str, int]] | None = None,
+    use_default_roles: bool | None = None,
+    disabled_roles: set[str] | None = None,
     product_unlock_status: dict[str, bool] | None = None,
     product_unlock_status_by_city: dict[str, dict[str, bool]] | None = None,
     use_default_product_unlock_status: bool | None = None,
@@ -315,6 +428,7 @@ def select_planned_routes(
     refresh_cache: bool = False,
     use_local_baseline: bool = False,
 ) -> tuple[list[tuple[RoutesModel, dict[str, Any]]], str | None]:
+    exclude_cities = refresh_unavailable_cities_before_planning(exclude_cities)
     emit_run_status("正在规划路线", "正在读取行情并计算推荐路线")
     market = load_planner_market(
         api_url=api_url,
@@ -343,6 +457,9 @@ def select_planned_routes(
         blocked_goods=blocked_goods,
         default_prestige_level=default_prestige_level,
         prestige_by_city=prestige_by_city,
+        roles=roles,
+        use_default_roles=use_default_roles,
+        disabled_roles=disabled_roles,
         product_unlock_status=product_unlock_status,
         product_unlock_status_by_city=product_unlock_status_by_city,
         use_default_product_unlock_status=use_default_product_unlock_status,
@@ -389,6 +506,9 @@ def select_planned_route(
     blocked_goods: set[str] | None = None,
     default_prestige_level: int | None = None,
     prestige_by_city: dict[str, int] | None = None,
+    roles: dict[str, dict[str, int]] | None = None,
+    use_default_roles: bool | None = None,
+    disabled_roles: set[str] | None = None,
     product_unlock_status: dict[str, bool] | None = None,
     product_unlock_status_by_city: dict[str, dict[str, bool]] | None = None,
     use_default_product_unlock_status: bool | None = None,
@@ -419,6 +539,9 @@ def select_planned_route(
         blocked_goods=blocked_goods,
         default_prestige_level=default_prestige_level,
         prestige_by_city=prestige_by_city,
+        roles=roles,
+        use_default_roles=use_default_roles,
+        disabled_roles=disabled_roles,
         product_unlock_status=product_unlock_status,
         product_unlock_status_by_city=product_unlock_status_by_city,
         use_default_product_unlock_status=use_default_product_unlock_status,
@@ -458,6 +581,9 @@ def run_planned_business(
     blocked_goods: set[str] | None = None,
     default_prestige_level: int | None = None,
     prestige_by_city: dict[str, int] | None = None,
+    roles: dict[str, dict[str, int]] | None = None,
+    use_default_roles: bool | None = None,
+    disabled_roles: set[str] | None = None,
     product_unlock_status: dict[str, bool] | None = None,
     product_unlock_status_by_city: dict[str, dict[str, bool]] | None = None,
     use_default_product_unlock_status: bool | None = None,
@@ -489,6 +615,9 @@ def run_planned_business(
         blocked_goods=blocked_goods,
         default_prestige_level=default_prestige_level,
         prestige_by_city=prestige_by_city,
+        roles=roles,
+        use_default_roles=use_default_roles,
+        disabled_roles=disabled_roles,
         product_unlock_status=product_unlock_status,
         product_unlock_status_by_city=product_unlock_status_by_city,
         use_default_product_unlock_status=use_default_product_unlock_status,
@@ -523,9 +652,47 @@ def execute_planned_route(
         **summary_profit_status_fields(summary),
     )
     control_state.STOP = False
+    reset_strength_runtime_state()
     ok = False
+    replan_attempts = 0
     while not control_state.STOP:
-        ok = bool(run(route))
+        try:
+            ok = bool(run(route))
+        except TradeRouteReplanRequired as exc:
+            replan_attempts += 1
+            if replan_attempts > MAX_RUNTIME_REPLAN_ATTEMPTS:
+                error = "商品解锁状态反复变化，已达到重新规划上限"
+                logger.warning(f"{error}: {exc}")
+                emit_run_status("重新规划失败", error)
+                return PlannedBusinessResult(False, True, route, summary, error)
+
+            logger.warning(f"商品解锁状态变化，重新规划路线: {exc}")
+            emit_run_status(
+                "正在重新规划路线",
+                str(exc),
+                route=_summary_route_text(summary),
+                **summary_profit_status_fields(summary),
+            )
+            try:
+                go_home()
+            except Exception as home_exc:
+                logger.debug(f"重新规划前返回主界面失败，继续尝试规划: {home_exc}")
+            new_route, new_summary, error = select_planned_route(
+                strategy=strategy,
+                use_cache=True,
+            )
+            if error or not new_route:
+                error = error or "商品解锁状态变化后没有计算出新路线"
+                emit_run_status("重新规划失败", error)
+                return PlannedBusinessResult(False, True, route, summary, error)
+            route, summary = new_route, new_summary
+            emit_run_status(
+                "已重新规划路线",
+                "商品解锁状态已更新，正在按新路线继续执行",
+                route=_summary_route_text(summary),
+                **summary_profit_status_fields(summary),
+            )
+            continue
         if not ok or control_state.STOP:
             break
         emit_run_status(
@@ -541,7 +708,7 @@ def execute_planned_route(
 
             emit_run_status(
                 "正在刷新账号配置",
-                "跑商完成后正在检查货舱和城市声望",
+                "跑商完成后正在检查货舱、城市声望和乘员共振",
                 route=_summary_route_text(summary),
                 **summary_profit_status_fields(summary),
             )
@@ -550,6 +717,7 @@ def execute_planned_route(
                 update_trade_account_profile(
                     cargo_capacity=profile.cargo_capacity,
                     prestige_by_city=profile.prestige_by_city,
+                    role_resonance=profile.role_resonance,
                     unavailable_cities=profile.unavailable_cities,
                     reason="跑商完成后刷新",
                 )

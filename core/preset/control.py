@@ -20,6 +20,10 @@ from core.utils.runtime_state import capture_state
 from core.utils.utils import RESOURCES_PATH
 
 GO_HOME_ATTEMPTS = 12
+PROFILE_PANEL_TEXTS = ("查看更多信息", "列车长形象", "运营总览", "营运总览", "导航手册")
+PROFILE_PANEL_CLOSE_POINTS = ((1020, 520), (760, 620), (1180, 120))
+EXIT_ACCOUNT_TEXTS = ("是否退出当前账号", "退出当前账号")
+EXIT_ACCOUNT_CANCEL_POINT = (320, 503)
 
 
 def wait_gbr(
@@ -217,13 +221,52 @@ def find_text(
     return None, image
 
 
+def _screen_texts(image=None) -> list[str]:
+    image = image or screenshot()
+    return [str(item.get("text", "")).replace(" ", "") for item in image.ocr()]
+
+
+def _is_profile_panel_open(image=None) -> bool:
+    texts = _screen_texts(image)
+    return any(keyword in text for keyword in PROFILE_PANEL_TEXTS for text in texts)
+
+
+def _close_profile_panel_if_open(image=None) -> bool:
+    if not _is_profile_panel_open(image):
+        return False
+    logger.info("检测到个人信息面板，先关闭面板再返回主界面")
+    for point in PROFILE_PANEL_CLOSE_POINTS:
+        click(point)
+        time.sleep(0.8)
+        if not _is_profile_panel_open():
+            return True
+    return False
+
+
+def _cancel_exit_account_prompt(image=None) -> bool:
+    texts = _screen_texts(image)
+    if not any(keyword in text for keyword in EXIT_ACCOUNT_TEXTS for text in texts):
+        return False
+    logger.warning("检测到退出账号确认弹窗，点击取消")
+    click(EXIT_ACCOUNT_CANCEL_POINT)
+    time.sleep(0.8)
+    return True
+
+
 def go_home():
     """
     返回主界面
     """
     logger.info("返回主界面")
     for attempt in range(1, GO_HOME_ATTEMPTS + 1):
-        if screenshot().match_template(RESOURCES_PATH / "main_map.png", 0.96):
+        image = screenshot()
+        if _cancel_exit_account_prompt(image):
+            continue
+        if _close_profile_panel_if_open(image):
+            if _cancel_exit_account_prompt():
+                continue
+            return True
+        if image.match_template(RESOURCES_PATH / "main_map.png", 0.96):
             return True
         time.sleep(1)
         logger.debug("尝试返回主界面")
