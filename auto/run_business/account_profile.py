@@ -825,13 +825,9 @@ def _ensure_crew_sort_by_acquired_time() -> bool:
             None,
         )
         if sort_entry is None:
-            if attempt == 0:
-                input_tap((1015, 118))
-                time.sleep(0.6)
-                continue
-            capture_state("account_profile_crew_sort_missing", raw)
-            capture_page_state("account_profile_crew_sort_missing")
-            return False
+            logger.debug("未识别到乘员获取时间排序控件，等待后重试")
+            time.sleep(0.8)
+            continue
 
         arrow_down = _crew_sort_arrow_down(raw, sort_entry)
         if arrow_down is True:
@@ -842,6 +838,10 @@ def _ensure_crew_sort_by_acquired_time() -> bool:
 
         input_tap(_crew_sort_tap_point(raw, sort_entry))
         time.sleep(0.7)
+    capture_state("account_profile_crew_sort_unconfirmed", raw)
+    capture_page_state("account_profile_crew_sort_unconfirmed")
+    logger.warning("未能确认乘员获取时间排序控件，按当前排序继续扫描，避免误点筛选")
+    emit_run_status("乘员排序未确认", "未识别到获取时间控件，已跳过排序点击")
     return True
 
 
