@@ -1,6 +1,6 @@
 [project]
 name = "night-chains-tech"
-version = "0.2.2"
+version = "0.2.3"
 description = "Default template for PDM package"
 authors = [
     {name = "Night-stars-1", email = "nujj1042633805@gmail.com"},

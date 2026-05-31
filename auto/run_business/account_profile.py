@@ -57,8 +57,10 @@ CREW_DEBUG_DIR = RESOURCES_PATH.parent / "diagnostics" / "crew_resonance"
 PLANNER_MAX_PRESTIGE_LEVEL = 20
 PROFILE_PANEL_TEXTS = ("查看更多信息", "运营总览", "导航手册", "UID", "资产")
 PROFILE_PLAIN_CONFIRM_TEXTS = ("确认", "确定")
-CREW_WAREHOUSE_ENTRY_POINTS = ((1225, 58), (1210, 58), (1190, 58), (1240, 84))
-CREW_WAREHOUSE_TEXTS = ("乘员仓库", "获取时间", "共振", "等级", "筛选")
+CREW_WAREHOUSE_ENTRY_POINT = (1225, 58)
+CREW_WAREHOUSE_ENTRY_RETRIES = 3
+CREW_WAREHOUSE_OPEN_TIMEOUT_SECONDS = 3.5
+CREW_WAREHOUSE_TEXTS = ("乘员仓库", "获取时间", "共振", "等级", "稀有度")
 CREW_SORT_TEXTS = ("获取时间",)
 CREW_LIST_CROP1 = (0, 80)
 CREW_LIST_CROP2 = (1260, 695)
@@ -626,8 +628,41 @@ def _is_profile_panel_open() -> bool:
     return _has_any_text(_screen_texts(), PROFILE_PANEL_TEXTS)
 
 
+def _looks_like_crew_warehouse_texts(texts: list[str]) -> bool:
+    cleaned = [_clean_text(text) for text in texts if _clean_text(text)]
+    if not cleaned:
+        return False
+    joined = "".join(cleaned)
+    header_hits = sum(1 for text in ("获取时间", "稀有度", "等级") if text in joined)
+    if "获取时间" in joined and header_hits >= 2:
+        return True
+
+    role_hits: set[str] = set()
+    for role in load_role_catalog_names():
+        clean_role = _clean_text(role)
+        if clean_role and any(clean_role in text for text in cleaned):
+            role_hits.add(clean_role)
+    lv_hits = sum(1 for text in cleaned if "LV" in text.upper())
+    star_hits = sum(1 for text in cleaned if "★" in text)
+    if len(role_hits) >= 3 and (lv_hits >= 2 or star_hits >= 2):
+        return True
+    return len(role_hits) >= 5
+
+
 def _is_crew_warehouse_open() -> bool:
-    return _has_any_text(_screen_texts(), CREW_WAREHOUSE_TEXTS)
+    return _looks_like_crew_warehouse_texts(_screen_texts())
+
+
+def _wait_for_crew_warehouse_open(timeout_seconds: float = CREW_WAREHOUSE_OPEN_TIMEOUT_SECONDS) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    last_texts: list[str] = []
+    while time.monotonic() < deadline:
+        last_texts = _screen_texts()
+        if _looks_like_crew_warehouse_texts(last_texts):
+            return True
+        time.sleep(0.35)
+    logger.debug(f"等待乘员仓库打开超时，最近识别文本: {last_texts[:18]}")
+    return False
 
 
 def _tap_plain_confirm_popup() -> bool:
@@ -655,14 +690,16 @@ def _open_profile_panel() -> bool:
 def _open_crew_warehouse() -> bool:
     go_home()
     time.sleep(0.5)
-    for point in CREW_WAREHOUSE_ENTRY_POINTS:
-        input_tap(point)
-        time.sleep(1.0)
-        if _is_crew_warehouse_open():
+    if _wait_for_crew_warehouse_open(0.8):
+        return True
+    for attempt in range(CREW_WAREHOUSE_ENTRY_RETRIES):
+        input_tap(CREW_WAREHOUSE_ENTRY_POINT)
+        if _wait_for_crew_warehouse_open():
             return True
         if _tap_plain_confirm_popup():
-            if _is_crew_warehouse_open():
+            if _wait_for_crew_warehouse_open(1.5):
                 return True
+        if attempt < CREW_WAREHOUSE_ENTRY_RETRIES - 1:
             go_home()
             time.sleep(0.5)
     capture_state("account_profile_crew_warehouse_missing")
