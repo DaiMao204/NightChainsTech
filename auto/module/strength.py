@@ -1589,6 +1589,17 @@ def _strength_satisfied_after_recovery(required_fatigue: int, source: str) -> bo
     return status.remaining >= required
 
 
+def _allow_unverified_recovery_result(source: str) -> bool:
+    """A confirmed recovery action may leave the fatigue page before we can re-read it."""
+    if _is_strength_page():
+        return False
+    logger.warning(
+        f"{source}已执行，但当前不在疲劳页，无法继续确认疲劳值；"
+        "按已恢复处理并交给后续交易流程复查"
+    )
+    return True
+
+
 def recover_strength_by_config(required_fatigue: int = MIN_TRADE_STRENGTH) -> bool:
     if not has_configured_strength_recovery():
         logger.info("未启用任何疲劳恢复资源，停止跑商")
@@ -1617,8 +1628,8 @@ def recover_strength_by_config(required_fatigue: int = MIN_TRADE_STRENGTH) -> bo
                 used_any = used_this_round = True
                 if _strength_satisfied_after_recovery(required_fatigue, "喝酒恢复"):
                     return True
-                if not _is_strength_page():
-                    return False
+                if _allow_unverified_recovery_result("喝酒恢复"):
+                    return True
 
             if (
                 not _visible_strength_enough(required_fatigue)
@@ -1631,8 +1642,8 @@ def recover_strength_by_config(required_fatigue: int = MIN_TRADE_STRENGTH) -> bo
                     used_any = used_this_round = True
                     if _strength_satisfied_after_recovery(required_fatigue, "使用便当"):
                         return True
-                    if not _is_strength_page():
-                        return False
+                    if _allow_unverified_recovery_result("使用便当"):
+                        return True
 
             if not _visible_strength_enough(required_fatigue) and bool(cfg.RunUseStrengthMedicine.value):
                 if not _ensure_strength_page_for_recovery("使用体力药"):
@@ -1644,8 +1655,8 @@ def recover_strength_by_config(required_fatigue: int = MIN_TRADE_STRENGTH) -> bo
                         used_any = used_this_round = True
                         if _strength_satisfied_after_recovery(required_fatigue, f"使用{resource.name}"):
                             return True
-                        if not _is_strength_page():
-                            return False
+                        if _allow_unverified_recovery_result(f"使用{resource.name}"):
+                            return True
                         break
 
             if (
@@ -1658,8 +1669,8 @@ def recover_strength_by_config(required_fatigue: int = MIN_TRADE_STRENGTH) -> bo
                 used_any = used_this_round = True
                 if _strength_satisfied_after_recovery(required_fatigue, "使用桦石"):
                     return True
-                if not _is_strength_page():
-                    return False
+                if _allow_unverified_recovery_result("使用桦石"):
+                    return True
 
             if not used_this_round:
                 logger.info(f"第 {attempt} 轮疲劳恢复未找到可用资源")
