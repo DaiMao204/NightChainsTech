@@ -1,11 +1,16 @@
 # 黑月科技
 
+> [!IMPORTANT]
+> 本项目已停止维护，后续开发已迁移至 [DaiMao204/MaaResonance](https://github.com/DaiMao204/MaaResonance)。
+> 本仓库仅保留 NightChainsTech 历史源码、历史发布包和问题排查记录，不再接收新功能开发。
+> 新版本下载、使用说明与问题反馈请前往 [MaaResonance Releases](https://github.com/DaiMao204/MaaResonance/releases) 和 [MaaResonance Issues](https://github.com/DaiMao204/MaaResonance/issues)。
+
 雷索纳斯自动化辅助工具，当前维护版对原项目进行了重构，优化和新增了大量功能，同时大幅调整了UI界面。
 
 本项目基于 [Night-stars-1/Auto_Resonance](https://github.com/Night-stars-1/Auto_Resonance) 继续维护和重构，保留了原项目许可和作者声明。
 
 > [!WARNING]
-> 当前版本为 `v0.2.5`。自动跑商、地图识别、账号配置读取和疲劳恢复仍建议在不同账号与模拟器环境中继续反馈验证。
+> 最终维护版本为 `v0.2.5`。自动跑商、地图识别、账号配置读取和疲劳恢复仍可能受游戏 UI 更新影响；如需继续使用或反馈，请优先关注迁移后的 MaaResonance 项目。
 
 ## 主要变化
 
@@ -51,7 +56,10 @@
 
 ## 下载与运行
 
-1. 前往 [Releases](https://github.com/DaiMao204/NightChainsTech/releases/latest) 下载 `NightChainsTech_<version>.zip`。
+> [!NOTE]
+> NightChainsTech 的发布包仅作为历史版本保留。新版本请前往 [MaaResonance Releases](https://github.com/DaiMao204/MaaResonance/releases) 下载。
+
+1. 如需使用旧版，前往 [历史 Releases](https://github.com/DaiMao204/NightChainsTech/releases) 下载 `NightChainsTech_<version>.zip`。
 2. 解压到英文路径目录。
 3. 运行 `黑月科技.exe`。
 
@@ -72,7 +80,7 @@ python gui.py
 
 ## 自动更新
 
-软件内点击左侧底部 `更新`，会检查本仓库最新 GitHub Release。
+旧版软件内点击左侧底部 `更新`，仍只会检查 NightChainsTech 历史 GitHub Release，不会自动迁移到 MaaResonance。
 
 发布完整包时建议同时在 Release 说明中写入 SHA256：
 
@@ -82,7 +90,7 @@ SHA256: <64位sha256>
 
 ## 反馈
 
-请前往 [Issues](https://github.com/DaiMao204/NightChainsTech/issues) 提交问题、截图、日志和复现步骤。
+NightChainsTech 不再接收新功能反馈。与后续版本相关的问题，请前往 [MaaResonance](https://github.com/DaiMao204/MaaResonance) 处理。
 
 ## 许可
 
